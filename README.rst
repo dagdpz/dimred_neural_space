@@ -5,9 +5,9 @@ Create virtual environment and activate
 
 .. code-block:: bash
 
-   python -m venv pul_pc_analysis
+   python3 -m venv .venv
 
-   .\pul_pc_analysis\Scripts\activate
+   source .venv\bin\activate
 
 Install dependencies using TOML file
 
@@ -19,6 +19,6 @@ Main file to execute
 
 .. code-block:: bash
 
-   python .\main.py
+   python3 .\main.py
 
 

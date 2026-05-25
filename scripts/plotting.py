@@ -5,6 +5,35 @@ from itertools import product
 
 from scripts.utils import *
 
+CONDITION_COLORS = {
+    # effector, reach_hand, target_hemifield
+    ("reach", "ipsi", "ipsi"): "#005fbf",
+    ("reach", "ipsi", "contra"): "#bf00bf",
+    ("reach", "contra", "ipsi"): "#00bf00",
+    ("reach", "contra", "contra"): "#bf5f00",
+    ("saccade", "ipsi", "ipsi"): "#007fff",
+    ("saccade", "ipsi", "contra"): "#ff00ff",
+    ("saccade", "contra", "ipsi"): "#00ff00",
+    ("saccade", "contra", "contra"): "#ff7f00",
+}
+
+
+def get_condition_color(row, condition_cols, fallback_color):
+    """
+    Order: effector, reach_hand, target_hemifield
+    """
+    key = tuple(
+        row[col]
+        for col in ["effector", "reach_hand", "target_hemifield"]
+        if col in condition_cols
+    )
+
+    # If all three variables are plotted together
+    if len(key) == 3 and key in CONDITION_COLORS:
+        return CONDITION_COLORS[key]
+
+    return fallback_color
+
 
 def plot_condition_subplot(
     ax,
@@ -24,7 +53,8 @@ def plot_condition_subplot(
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     cond_handles = []
     for i, (_, row) in enumerate(condition_sdf.iterrows()):
-        c = colors[i % len(colors)]
+        fallback = colors[i % len(colors)]
+        c = get_condition_color(row, condition_cols, fallback)
 
         label = " | ".join(f"{col}={row[col]}" for col in condition_cols)
 
@@ -61,9 +91,150 @@ def plot_condition_subplot(
     return True
 
 
-def plot_sdf_per_condition(plot_condition, condition_cols, data, t_start, t_end):
-    plots_dir = Path("plots")
+def plot_effector_sdf(
+    data,
+    reach_hand,
+    target_hemifield,
+    *,
+    plots_dir=None,
+    analysis_label=None,
+):
+    plots_dir = Path("plots") if plots_dir is None else Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
+    title_prefix = f"{analysis_label} | " if analysis_label else ""
+
+    effector_colors = {
+        "reach": CONDITION_COLORS[("reach", f"{reach_hand}", f"{target_hemifield}")],
+        "saccade": CONDITION_COLORS[
+            ("saccade", f"{reach_hand}", f"{target_hemifield}")
+        ],
+    }
+
+    marker_handles = [
+        Line2D(
+            [0],
+            [0],
+            color="0.35",
+            linestyle="--",
+            label="Cue onset (state 6)",
+        ),
+        Line2D(
+            [0],
+            [0],
+            color="0.35",
+            linestyle=":",
+            label="Movement onset (state 68)",
+        ),
+    ]
+    required_cols = [
+        "effector",
+        "sdf_rate_cue",
+        "sdf_time_cue",
+        "sdf_rate_mov",
+        "sdf_time_mov",
+    ]
+    plot_df = data.dropna(subset=required_cols).copy()
+    plot_df = plot_df[np.isfinite(plot_df["t_cue"])]
+    unit_group_cols = ["session", "unit_ID"]
+
+    for _, unit_df in plot_df.groupby(unit_group_cols, sort=True):
+        unit_id = unit_df["unit_ID"].iloc[0]
+        session = unit_df["session"].iloc[0]
+
+        fig, (ax1, ax2) = plt.subplots(
+            1, 2, figsize=(6, 5), sharey=True, constrained_layout=True
+        )
+
+        cue_time = unit_df["sdf_time_cue"].dropna().iloc[0]
+        mov_time = unit_df["sdf_time_mov"].dropna().iloc[0]
+        cue_sdf = (
+            unit_df.groupby("effector")["sdf_rate_cue"].apply(mean_sdf).reset_index()
+        )
+        mov_sdf = (
+            unit_df.groupby("effector")["sdf_rate_mov"].apply(mean_sdf).reset_index()
+        )
+
+        cond_handles = []
+        for _, row in cue_sdf.iterrows():
+            effector = row["effector"]
+            color = effector_colors.get(effector, "0.4")
+            (line,) = ax1.plot(
+                cue_time,
+                row["sdf_rate_cue"],
+                color=color,
+                label=f"effector={effector}",
+            )
+            cond_handles.append(line)
+        for _, row in mov_sdf.iterrows():
+            effector = row["effector"]
+            color = effector_colors.get(effector, "0.4")
+            (line,) = ax2.plot(
+                mov_time,
+                row["sdf_rate_mov"],
+                color=color,
+                label=f"effector={effector}",
+            )
+        ax1.axvline(
+            0.0,
+            color="0.35",
+            linestyle="--",
+            linewidth=1.5,
+            alpha=0.9,
+            zorder=0,
+        )
+        ax2.axvline(
+            0.0,
+            color="0.35",
+            linestyle=":",
+            linewidth=1.5,
+            alpha=0.9,
+            zorder=0,
+        )
+
+        fig.legend(
+            handles=cond_handles + marker_handles,
+            loc="lower center",
+            bbox_to_anchor=(0.5, -0.05),
+            ncol=len(cond_handles) + len(marker_handles),
+            fontsize=8,
+            frameon=False,
+        )
+
+        ax1.set_ylabel("Firing rate (Hz)")
+        ax1.set_xlabel("Time relative to cue onset (s)")
+        ax2.set_xlabel("Time relative to movement onset (s)")
+
+        ax1.set_title("Cue-aligned")
+        ax2.set_title("Movement-aligned")
+        ax1.grid(True, alpha=0.3)
+        ax2.grid(True, alpha=0.3)
+
+        fig.suptitle(
+            f"unit {unit_id} | hand={reach_hand}, target={target_hemifield}",
+            fontsize=12,
+        )
+
+        out_path = (
+            plots_dir / f"{safe_filename_part(unit_id)}"
+            f"_hand_{reach_hand}_target_{target_hemifield}_effector_sdf.png"
+        )
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_sdf_per_condition(
+    plot_condition,
+    condition_cols,
+    data,
+    t_start,
+    t_end,
+    *,
+    plots_dir=None,
+    analysis_label=None,
+):
+    plots_dir = Path("plots") if plots_dir is None else Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    title_prefix = f"{analysis_label} | " if analysis_label else ""
 
     # The plotted line conditions are all condition columns except the subplot condition
     line_condition_cols = [c for c in condition_cols if c != plot_condition]
@@ -92,8 +263,10 @@ def plot_sdf_per_condition(plot_condition, condition_cols, data, t_start, t_end)
     # Unique subplot levels, e.g. ["saccade", "reach"]
     condition_levels = sorted(plot_df[plot_condition].dropna().unique())
 
-    for unit_idx, unit_df in plot_df.groupby("unit_index", sort=True):
+    unit_group_cols = ["session", "unit_ID"]
+    for _, unit_df in plot_df.groupby(unit_group_cols, sort=True):
         unit_id = unit_df["unit_ID"].iloc[0]
+        session = unit_df["session"].iloc[0]
         time_series = unit_df["sdf_time"].dropna().iloc[0]
         n_levels = len(condition_levels)
 
@@ -125,11 +298,12 @@ def plot_sdf_per_condition(plot_condition, condition_cols, data, t_start, t_end)
             continue
         axes[-1].set_xlabel("Time relative to cue onset (state 6) (s)")
         fig.suptitle(
-            f"Unit {unit_id} grouped by {plot_condition}",
+            f"{title_prefix}{session} | unit {unit_id} grouped by {plot_condition}",
             fontsize=12,
         )
         out_path = (
-            plots_dir / f"unit_{safe_filename_part(unit_id)}_by_{plot_condition}.png"
+            plots_dir
+            / f"{safe_filename_part(session)}_unit_{safe_filename_part(unit_id)}_by_{plot_condition}.png"
         )
         fig.savefig(out_path, dpi=200, bbox_inches="tight")
         plt.close(fig)
@@ -143,7 +317,8 @@ def plot_dpca_results(
     cond_col_names,
     plots_dir,
     *,
-    marginalizations=("t", "e", "h", "s", "eh", "hs"),
+    analysis_label=None,
+    marginalizations=("t", "h", "s", "hs", "ht", "st"),
     max_components=3,
     dpi=150,
 ):
@@ -158,7 +333,8 @@ def plot_dpca_results(
 
     plots_dir.mkdir(parents=True, exist_ok=True)
     evr_dict = getattr(dpca_obj, "explained_variance_ratio_", {}) or {}
-    print(evr_dict)
+    title_prefix = f"{analysis_label} — " if analysis_label else ""
+    print(f"[{analysis_label or plots_dir}] {evr_dict}")
 
     for key in marginalizations:
         if key not in Z:
@@ -210,7 +386,7 @@ def plot_dpca_results(
                 ax.legend(fontsize=7, loc="upper right")
 
         axes[-1].set_xlabel("Time relative to cue onset (s)")
-        fig.suptitle(f"dPCA marginalization «{key}»", fontsize=12)
+        fig.suptitle(f"{title_prefix}dPCA marginalization «{key}»", fontsize=12)
         out = plots_dir / f"dpca_timecourses_{key}.png"
         fig.savefig(out, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
@@ -239,7 +415,9 @@ def plot_dpca_results(
                 li += 1
             ax.set_xlabel(_dpca_component_title("t", 0, evr_dict))
             ax.set_ylabel(_dpca_component_title("t", 1, evr_dict))
-            ax.set_title("dPC1 vs dPC2 (time marginalization); ○ start, × end")
+            ax.set_title(
+                f"{title_prefix}dPC1 vs dPC2 (time marginalization); ○ start, × end"
+            )
             ax.grid(True, alpha=0.3)
             ax.legend(fontsize=7, loc="best")
             fig.savefig(
