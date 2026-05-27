@@ -5,24 +5,15 @@ import numpy as np
 import pandas as pd
 from dPCA import dPCA
 
-from preprocess import PROCESSED_TRIALS_PATH
+from scripts.preprocess import *
 from scripts.plotting import *
 from scripts.utils import *
-
-
-def load_processed_trials(path=PROCESSED_TRIALS_PATH):
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Missing {path}. Run `python preprocess.py` first.")
-    return pd.read_pickle(path)
 
 
 def main(seed=0):
     """
     Load preprocessed trials, align spikes to cue, compute SDFs, then run dPCA.
     """
-    rng = np.random.default_rng(seed)
-
     df = load_processed_trials()
 
     # --- Align spikes and event times to states

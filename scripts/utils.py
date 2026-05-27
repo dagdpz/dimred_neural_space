@@ -16,24 +16,6 @@ def clean_mat_value(x):
     return x
 
 
-def decode_reach_hand_label(x):
-    if pd.isna(x):
-        return np.nan
-    x = int(x)
-    if x == 1:
-        return "left"
-    elif x == 2:
-        return "right"
-    else:
-        return np.nan
-
-
-def ipsi_contra(side, reference_side):
-    if pd.isna(side) or pd.isna(reference_side):
-        return np.nan
-    return "ipsi" if side == reference_side else "contra"
-
-
 def decode_effector_label(x):
     if pd.isna(x):
         return np.nan
@@ -44,6 +26,18 @@ def decode_effector_label(x):
         return "reach"
     elif x == 6:
         return "saccade_reach"
+    else:
+        return np.nan
+
+
+def decode_reach_hand_label(x):
+    if pd.isna(x):
+        return np.nan
+    x = int(x)
+    if x == 1:
+        return "left"
+    elif x == 2:
+        return "right"
     else:
         return np.nan
 
@@ -75,6 +69,12 @@ def pulvinar_to_side(x):
         return "left"
     else:
         return np.nan
+
+
+def ipsi_contra(side, reference_side):
+    if pd.isna(side) or pd.isna(reference_side):
+        return np.nan
+    return "ipsi" if side == reference_side else "contra"
 
 
 def get_state_onset(states_onset, states, state_id):

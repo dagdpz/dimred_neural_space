@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 
-
 from scripts.plotting import *
 from scripts.utils import *
 
@@ -119,10 +118,8 @@ def save_processed_trials(df, path=PROCESSED_TRIALS_PATH):
     print(f"Wrote {len(df)} rows to {path}")
 
 
-def main():
-    df = build_processed_trials()
-    save_processed_trials(df)
-
-
-if __name__ == "__main__":
-    main()
+def load_processed_trials(path=PROCESSED_TRIALS_PATH):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing {path}. Run `python preprocess.py` first.")
+    return pd.read_pickle(path)
