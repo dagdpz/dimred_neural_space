@@ -59,6 +59,7 @@ def fit_tdr_axes(
     *,
     unit_cols=("session", "unit_ID"),
     regressors=("E", "T", "H"),
+    interaction=False,
 ):
     """
     Fits one regression per unit.
@@ -82,6 +83,9 @@ def fit_tdr_axes(
     units = list(units)
 
     betas = []
+    interaction_terms = [
+        ("E", "H"),
+    ]
 
     for unit in units:
         unit_df = df.copy()
@@ -93,6 +97,18 @@ def fit_tdr_axes(
         y = np.nanmean(rates, axis=1)
 
         X = unit_df[list(regressors)].to_numpy(dtype=float)
+        print(unit_df[list(regressors)])
+        exit()
+
+        if interaction:
+            base_X = unit_df[list(regressors)].to_numpy(dtype=float)
+            interaction_X = np.column_stack(
+                [
+                    unit_df[a].to_numpy(dtype=float) * unit_df[b].to_numpy(dtype=float)
+                    for a, b in interaction_terms
+                ]
+            )
+            X = np.hstack([base_X, interaction_X])
 
         model = LinearRegression(fit_intercept=True)
         model.fit(X, y)

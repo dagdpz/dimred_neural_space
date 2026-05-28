@@ -121,6 +121,10 @@ def mean_sdf(series):
     return np.nanmean(arr, axis=0)
 
 
+def mean_rate_from_series(series_list):
+    return np.nanmean(np.concatenate(series_list.values))
+
+
 def safe_filename_part(s):
     """Replace characters unsafe in file names with underscores; keeps alphanumerics, hyphen, underscore."""
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(s))

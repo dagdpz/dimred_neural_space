@@ -314,9 +314,9 @@ def plot_tdr_timecolor_3d(
     stitched_time = np.asarray(stitched_time, dtype=float)
 
     cue_time = 0.0
-    go_time = 1.6
+    mov_time = 1.6
     cue_idx = np.nanargmin(np.abs(stitched_time - cue_time))
-    go_idx = np.nanargmin(np.abs(stitched_time - go_time))
+    mov_idx = np.nanargmin(np.abs(stitched_time - mov_time))
 
     fig = make_subplots(
         rows=1,
@@ -465,14 +465,14 @@ def plot_tdr_timecolor_3d(
 
         fig.add_trace(
             go.Scatter3d(
-                x=[x[go_idx]],
-                y=[y[go_idx]],
-                z=[z[go_idx]],
+                x=[x[mov_idx]],
+                y=[y[mov_idx]],
+                z=[z[mov_idx]],
                 mode="markers",
                 marker=dict(size=6, color="red", symbol="square"),
-                name="GO (1.6s)",
+                name="MOV (1.6s)",
                 showlegend=(col == 1),
-                hovertext=[f"GO: t=1.6s"],
+                hovertext=[f"MOV: t=1.6s"],
                 hoverinfo="text",
             ),
             row=1,

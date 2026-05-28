@@ -76,6 +76,46 @@ def main(seed=0):
     df["sdf_rate_mov"] = mov_sdf.apply(lambda x: x[1])
 
     # ------------------------------------------------------------
+    # Remove units with low firing rates
+    # ------------------------------------------------------------
+
+    threshold = 2.0
+    cue_rates = (
+        df.groupby(["session", "unit_ID"])["sdf_rate_cue"]
+        .apply(mean_rate_from_series)
+        .rename("cue_rate")
+    )
+    mov_rates = (
+        df.groupby(["session", "unit_ID"])["sdf_rate_mov"]
+        .apply(mean_rate_from_series)
+        .rename("mov_rate")
+    )
+    unit_stats = pd.concat([cue_rates, mov_rates], axis=1).reset_index()
+    unit_stats["mean_rate"] = (unit_stats["cue_rate"] + unit_stats["mov_rate"]) / 2
+
+    good_units = unit_stats[unit_stats["mean_rate"] >= threshold][
+        ["session", "unit_ID"]
+    ]
+    df = df.merge(good_units, on=["session", "unit_ID"], how="inner")
+
+    plt.figure(figsize=(6, 4))
+    plt.hist(unit_stats["mean_rate"], bins=50, edgecolor="black", alpha=0.75)
+    plt.axvline(
+        threshold,
+        color="red",
+        linestyle="--",
+        linewidth=2,
+        label=f"threshold = {threshold} Hz",
+    )
+    plt.xlabel("Mean firing rate (Hz)")
+    plt.ylabel("Number of units")
+    plt.title("Distribution of unit mean firing rates")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    # plt.show()
+
+    # ------------------------------------------------------------
     # Regressors
     # ------------------------------------------------------------
     df = add_tdr_regressors(df)
@@ -126,8 +166,7 @@ def main(seed=0):
     main_effect_regressors = ("E", "T", "H")
 
     axes_raw, axes_ortho, units = fit_tdr_axes(
-        df,
-        regressors=main_effect_regressors,
+        df, regressors=main_effect_regressors, interaction=False
     )
 
     # ------------------------------------------------------------
