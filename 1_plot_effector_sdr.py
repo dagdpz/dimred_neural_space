@@ -12,7 +12,7 @@ from scripts.utils import *
 
 def main(seed=0):
     """
-    Load preprocessed trials, align spikes to cue, compute SDFs, then run dPCA.
+    Load preprocessed trials, align spikes to cue, compute SDFs
     """
     df = load_processed_trials()
 

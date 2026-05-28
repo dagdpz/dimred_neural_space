@@ -51,9 +51,8 @@ def make_stitched_time(
 
     mov_t = mov_t_raw - mov_t_raw[0] + cue_t[-1] + dt
     stitched_t = np.concatenate([cue_t, mov_t])
-    segment = np.array(["cue"] * len(cue_t) + ["movement"] * len(mov_t))
     stitch_x = cue_t[-1]
-    return stitched_t, segment, stitch_x, cue_t, mov_t
+    return stitched_t, stitch_x, cue_t, mov_t
 
 
 def condition_mean_population(

@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 
+from scripts.utils import get_state_onset
+
 
 def add_tdr_regressors(df):
     """
@@ -13,12 +15,8 @@ def add_tdr_regressors(df):
     df = df.copy()
 
     df["E"] = df["effector"].map({"reach": 1.0, "saccade": -1.0})
-    df["T"] = df["target_hemifield"].map({"contra": 1.0, "ipsi": -1.0})
-    df["H"] = df["reach_hand"].map({"contra": 1.0, "ipsi": -1.0})
-
-    df["E_T"] = df["E"] * df["T"]
-    df["E_H"] = df["E"] * df["H"]
-    df["T_H"] = df["T"] * df["H"]
+    df["T"] = df["target_hemifield"].map({"contra": -1.0, "ipsi": 1.0})
+    df["H"] = df["reach_hand"].map({"contra": -1.0, "ipsi": 1.0})
 
     return df
 
@@ -59,7 +57,6 @@ def fit_tdr_axes(
     *,
     unit_cols=("session", "unit_ID"),
     regressors=("E", "T", "H"),
-    interaction=False,
 ):
     """
     Fits one regression per unit.
@@ -83,37 +80,59 @@ def fit_tdr_axes(
     units = list(units)
 
     betas = []
-    interaction_terms = [
-        ("E", "H"),
-    ]
-
     for unit in units:
         unit_df = df.copy()
+
+        # Select only the rows for the current unit
         for col, val in zip(unit_cols, unit):
             unit_df = unit_df[unit_df[col] == val]
-        unit_df = unit_df.dropna(subset=list(regressors) + ["stitched_rate"])
+        unit_df = unit_df.dropna(subset=list(regressors) + ["stitched_rate", "E"])
 
+        # Shape of rates is (n_trials, n_timepoints)
         rates = np.stack(unit_df["stitched_rate"].to_numpy())
-        y = np.nanmean(rates, axis=1)
 
-        X = unit_df[list(regressors)].to_numpy(dtype=float)
-        print(unit_df[list(regressors)])
-        exit()
+        # Square root transform the rates to stabilize variance
+        rates = np.sqrt(np.clip(rates, 0.0, None))
+        
+        # Flatten rates to (n_trials * n_timepoints,)
+        # Meaning we are predicting the rate for each timepoint and for all trials
+        y = rates.reshape(-1).astype(float)
 
-        if interaction:
-            base_X = unit_df[list(regressors)].to_numpy(dtype=float)
-            interaction_X = np.column_stack(
-                [
-                    unit_df[a].to_numpy(dtype=float) * unit_df[b].to_numpy(dtype=float)
-                    for a, b in interaction_terms
-                ]
-            )
-            X = np.hstack([base_X, interaction_X])
+        # Normalize y by the mean rate. This is per unit normalization.
+        mu = np.nanmean(y)
+        sd = np.nanstd(y, ddof=1)
+        y = (y - mu) / sd
+
+        # --- Regressors ---
+        # Shape of E_trial is (n_trials,)
+        # We need to repeat E_trial for each timepoint
+        E_trial = unit_df["E"].to_numpy(dtype=float)
+        E = np.repeat(E_trial, rates.shape[1])
+        H_trial = unit_df["H"].to_numpy(dtype=float)
+        H = np.repeat(H_trial, rates.shape[1])
+        T_trial = unit_df["T"].to_numpy(dtype=float)
+        T = np.repeat(T_trial, rates.shape[1])
+
+        t = unit_df["stitched_time"].iloc[0]
+        t = np.asarray(t, dtype=float)
+        cueCI_t = (t >= 0.0).astype(float)
+        cueCI = np.tile(cueCI_t, rates.shape[0])
+
+        dt_mov_go = unit_df["t_mov"].to_numpy(dtype=float) - unit_df["t_go"].to_numpy(dtype=float)
+        t_go_stitched = 1.6 - dt_mov_go
+        goCI = (t[None, :] >= t_go_stitched[:, None]).astype(float)
+        goCI[~np.isfinite(t_go_stitched), :] = 0.0
+        goCI = goCI.reshape(-1)
+
+        # design matrix
+        X = np.column_stack([E, H, T, cueCI, goCI])
 
         model = LinearRegression(fit_intercept=True)
         model.fit(X, y)
 
-        betas.append(model.coef_)
+        colnames = ["E", "H", "T", "cueCI", "goCI"]
+        keep = [colnames.index(k) for k in ("E", "H", "T")]
+        betas.append(model.coef_[keep])
 
     axes_raw = np.asarray(betas, dtype=float)
 
