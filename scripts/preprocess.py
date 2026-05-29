@@ -80,6 +80,9 @@ def process_labels_and_filter(df):
         axis=1,
     )
 
+    # Remove data with no spikes
+    df = df[~df["arrival_times"].isna()]
+
     select_columns = [
         "session",
         "unit_ID",
@@ -97,7 +100,7 @@ def process_labels_and_filter(df):
     return df[select_columns]
 
 
-def build_processed_trials(data_dir=Path("data")):
+def build_processed_trials(data_dir=Path("data"), normalize=True):
     population_files = sorted(data_dir.glob("*population*.mat"))
     if not population_files:
         raise FileNotFoundError(f"No *population*.mat files in {data_dir}")
@@ -107,19 +110,79 @@ def build_processed_trials(data_dir=Path("data")):
         part = load_population_spike_data(filepath)
         part["session"] = filepath.stem
         df = pd.concat([df, part], ignore_index=True)
+    df = process_labels_and_filter(df)
+    if normalize:
+        df = normalize_rates(df)
+    return df
 
-    return process_labels_and_filter(df)
 
+def normalize_rates(
+    df,
+    *,
+    unit_cols=("session", "unit_ID"),
+):
+    """
+    Normalize rates across units and trials
+    """
+    units = (
+        df[list(unit_cols)]
+        .drop_duplicates()
+        .sort_values(list(unit_cols))
+        .itertuples(
+            index=False, name=None
+        )  # create tuples from each row from dataframe
+    )
+    units = list(units)
+    for unit in units:
+        unit_df = df.copy()
 
-def save_processed_trials(df, path=PROCESSED_TRIALS_PATH):
+        # Select only the rows for the current unit
+        for col, val in zip(unit_cols, unit):
+            unit_df = unit_df[unit_df[col] == val]
+
+        unit_df[["sdf_time", "sdf_rate"]] = unit_df.apply(
+            lambda r: spike_times_to_sdf(
+                r["arrival_times"],
+                t_start=float(np.min(r["arrival_times"])),
+                t_end=float(np.max(r["arrival_times"])),
+                bin_size=0.001,
+                sigma=0.02,
+            ),
+            axis=1,
+            result_type="expand",
+        )
+
+        rates = np.concatenate(unit_df["sdf_rate"].to_numpy()).astype(float)
+        rates = np.sqrt(np.clip(rates, 0.0, None))
+        mu = np.mean(rates)
+        sd = np.std(rates, ddof=1)
+
+        def _norm_trial(arr):
+            arr = np.asarray(arr, dtype=float)
+            arr = np.sqrt(np.clip(arr, 0.0, None))
+            return (arr - mu) / sd
+
+        unit_df["sdf_rate"] = unit_df["sdf_rate"].apply(_norm_trial)
+
+        df.loc[unit_df.index, "sdf_rate"] = unit_df["sdf_rate"]
+        df.loc[unit_df.index, "sdf_time"] = unit_df["sdf_time"]
+
+    return df
+
+def save_processed_trials(df, normalize=True, path=PROCESSED_TRIALS_PATH):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_pickle(path)
+    if normalize:
+        path = path.with_suffix(path.suffix + "_normalized.pkl")
+        df.to_pickle(path)
     print(f"Wrote {len(df)} rows to {path}")
 
 
-def load_processed_trials(path=PROCESSED_TRIALS_PATH):
+def load_processed_trials(normalized=True, path=PROCESSED_TRIALS_PATH):
     path = Path(path)
+    if normalized:
+        path = path.with_suffix(path.suffix + "_normalized.pkl")
     if not path.exists():
         raise FileNotFoundError(f"Missing {path}. Run `python preprocess.py` first.")
     return pd.read_pickle(path)

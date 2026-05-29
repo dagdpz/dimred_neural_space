@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import matplotlib.pyplot as plt
 
 
 def padded_range(v, pad_frac=0.08):
@@ -512,3 +513,47 @@ def plot_tdr_timecolor_3d(
     )
 
     fig.write_html(out_path)
+
+
+def plot_tdr_axis_timecourses(
+    projections,
+    stitched_time,
+    axis_names,
+    *,
+    axes_to_plot=("E"),
+    cond_order=None,
+    cond_label_fn=str,
+    cue_time=0.0,
+    mov_time=1.6,
+    lw=2.0,
+    out_path=Path("plots/tdr/tdr_axis_timecourses_E_T_H.html"),
+):
+    t = np.asarray(stitched_time, dtype=float)
+    conds = list(projections.keys()) if cond_order is None else list(cond_order)
+    axis_idx = [axis_names.index(a) for a in axes_to_plot]
+
+    fig, axs = plt.subplots(
+        len(axis_idx), 1, figsize=(10, 2.8 * len(axis_idx)), sharex=True, sharey=False
+    )
+
+    if len(axis_idx) == 1:
+        axs = [axs]
+    
+    for row, (ax, a_name, ai) in enumerate(zip(axs, axes_to_plot, axis_idx)):
+        for cond in conds:
+            Y = np.asarray(projections[cond], dtype=float)
+            y = Y[ai, :]
+            ax.plot(t, y, lw=lw, label=cond_label_fn(cond))
+        if cue_time is not None:
+            ax.axvline(float(cue_time), color="k", ls="--", lw=1, alpha=0.7)
+        if mov_time is not None:
+            ax.axvline(float(mov_time), color="k", ls=":", lw=1.2, alpha=0.8)
+        ax.set_ylabel(a_name)
+        ax.grid(alpha=0.2)
+        if row == 0:
+            ax.legend(frameon=False, ncol=2)
+    
+    axs[-1].set_xlabel("time (s)")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)

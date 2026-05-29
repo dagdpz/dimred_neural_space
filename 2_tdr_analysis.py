@@ -18,7 +18,7 @@ def main(seed=0):
     Load preprocessed trials, align spikes to cue, compute SDFs, then run TDR.
     """
     rng = np.random.default_rng(seed)
-    df = load_processed_trials()
+    df = load_processed_trials(normalized=False)
 
     # ------------------------------------------------------------
     # Align spikes to cue and movement
@@ -52,10 +52,11 @@ def main(seed=0):
         lambda r: get_state_onset(r["states_onset"], r["states"], go_state),
         axis=1,
     )
-    
+
     # ------------------------------------------------------------
     # SDFs
     # ------------------------------------------------------------
+
     bin_size = 0.001  # 1 ms bins
     sigma = 0.02  # 50 ms Gaussian smoothing
     cue_sdf = df["arrival_times_cue"].apply(
@@ -175,19 +176,31 @@ def main(seed=0):
     )
 
     # ------------------------------------------------------------
-    # Condition-averaged trajectories
+    # Condition-averaged trajectories + projections
     # ------------------------------------------------------------
-    condition_pop = condition_mean_population(
-        df,
-        units,
-        condition_cols=("effector",),
-    )
+    condition_factors = {
+        "effector": ("effector",),
+        "reach_hand": ("reach_hand",),
+        "target_hemifield": ("target_hemifield",),
+    }
 
-    projections, axis_names = project_trajectories(
-        condition_pop,
-        axes_ortho,
-        main_effect_regressors,
-    )
+    condition_pops = {}
+    projections_by = {}
+    axis_names = list(main_effect_regressors)
+
+    for name, cols in condition_factors.items():
+        condition_pops[name] = condition_mean_population(
+            df, units, condition_cols=cols
+        )
+        projections_by[name], _ = project_trajectories(
+            condition_pops[name],
+            axes_ortho,
+            main_effect_regressors,
+        )
+
+    # aliases for effector-only plots below
+    condition_pop = condition_pops["effector"]
+    projections = projections_by["effector"]
 
     # ------------------------------------------------------------
     # Plots
@@ -214,6 +227,29 @@ def main(seed=0):
         out_path=Path("plots/tdr/tdr_reach_saccade_side_by_side_timecolor.html"),
         downsample=2,
     )
+
+    cond_label = lambda c: c[0] if isinstance(c, tuple) else str(c)
+
+    axis_timecourse_configs = [
+        ("E", "effector", [("reach",), ("saccade",)]),
+        ("T", "target_hemifield", [("contra",), ("ipsi",)]),
+        ("H", "reach_hand", [("contra",), ("ipsi",)]),
+    ]
+    for axis, factor, cond_order in axis_timecourse_configs:
+        plot_tdr_axis_timecourses(
+            projections_by[factor],
+            stitched_time,
+            axis_names,
+            axes_to_plot=(axis,),
+            cond_order=cond_order,
+            cond_label_fn=cond_label,
+            cue_time=0.0,
+            mov_time=1.6,
+            lw=2.0,
+            out_path=Path(f"plots/tdr/tdr_axis_timecourse_{axis}_by_{factor}.png"),
+        )
+
+
 
 
 if __name__ == "__main__":
