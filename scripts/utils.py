@@ -100,6 +100,38 @@ def trial_alignment_to_state(row, state):
     )
 
 
+def slice_sdf_to_event(
+    row,
+    *,
+    event_time_col,
+    t_start,
+    t_end,
+    bin_size=0.001,
+):
+    """
+    Take an already-computed SDF and extract a fixed window around one event.
+
+    Returns:
+        aligned_time: time relative to event
+        aligned_rate: SDF rate in that event-aligned window
+    """
+    sdf_time = np.asarray(row["sdf_time"], dtype=float)
+    sdf_rate = np.asarray(row["sdf_rate"], dtype=float)
+    event_time = float(row[event_time_col])
+
+    rel_time = np.arange(t_start, t_end, bin_size)
+    abs_time = event_time + rel_time
+    aligned_rate = np.interp(
+        abs_time,
+        sdf_time,
+        sdf_rate,
+        left=np.nan,
+        right=np.nan,
+    )
+
+    return rel_time, aligned_rate
+
+
 def spike_times_to_sdf(spike_times, t_start, t_end, bin_size=0.001, sigma=0.05):
     """Bin spikes, Gaussian-smooth counts, convert to Hz; returns (time_axis, rate) or NaN rate if spikes missing."""
     if isinstance(spike_times, float) and np.isnan(spike_times):

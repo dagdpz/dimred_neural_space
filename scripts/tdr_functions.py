@@ -66,7 +66,7 @@ def fit_tdr_axes(
 
     Returns:
         axes_raw: units x regressors beta matrix
-        axes_q: orthonormalized TDR axes from QR decomposition
+        axes_ortho: orthonormalized TDR axes from QR decomposition
         units: list of unit keys
     """
     units = (
@@ -86,58 +86,61 @@ def fit_tdr_axes(
         # Select only the rows for the current unit
         for col, val in zip(unit_cols, unit):
             unit_df = unit_df[unit_df[col] == val]
-        unit_df = unit_df.dropna(subset=list(regressors) + ["stitched_rate", "E"])
+        unit_df = unit_df.dropna(
+            subset=list(regressors)
+            + [
+                "stitched_rate",
+                "stitched_time",
+                "t_mov",
+                "t_go",
+            ]
+        )
+        if len(unit_df) == 0:
+            continue
 
-        # Shape of rates is (n_trials, n_timepoints)
-        rates = np.stack(unit_df["stitched_rate"].to_numpy())
+        # Already sqrt-transformed and normalized
+        # Shape: n_trials x n_timepoints
+        rates = np.stack(unit_df["stitched_rate"].to_numpy()).astype(float)
 
-        # Square root transform the rates to stabilize variance
-        rates = np.sqrt(np.clip(rates, 0.0, None))
-        
-        # Flatten rates to (n_trials * n_timepoints,)
-        # Meaning we are predicting the rate for each timepoint and for all trials
-        y = rates.reshape(-1).astype(float)
+        # Regression target:
+        # one row per trial-timepoint
+        y = rates.reshape(-1)
 
-        # Normalize y by the mean rate. This is per unit normalization.
-        mu = np.nanmean(y)
-        sd = np.nanstd(y, ddof=1)
-        y = (y - mu) / sd
+        # Trial-level task regressors repeated across time
+        n_trials, n_time = rates.shape
 
-        # --- Regressors ---
-        # Shape of E_trial is (n_trials,)
-        # We need to repeat E_trial for each timepoint
-        E_trial = unit_df["E"].to_numpy(dtype=float)
-        E = np.repeat(E_trial, rates.shape[1])
-        H_trial = unit_df["H"].to_numpy(dtype=float)
-        H = np.repeat(H_trial, rates.shape[1])
-        T_trial = unit_df["T"].to_numpy(dtype=float)
-        T = np.repeat(T_trial, rates.shape[1])
+        E = np.repeat(unit_df["E"].to_numpy(dtype=float), n_time)
+        H = np.repeat(unit_df["H"].to_numpy(dtype=float), n_time)
+        T = np.repeat(unit_df["T"].to_numpy(dtype=float), n_time)
 
-        t = unit_df["stitched_time"].iloc[0]
-        t = np.asarray(t, dtype=float)
+        # Time-dependent condition-independent regressors
+        t = np.asarray(unit_df["stitched_time"].iloc[0], dtype=float)
+
         cueCI_t = (t >= 0.0).astype(float)
-        cueCI = np.tile(cueCI_t, rates.shape[0])
+        cueCI = np.tile(cueCI_t, n_trials)
 
-        dt_mov_go = unit_df["t_mov"].to_numpy(dtype=float) - unit_df["t_go"].to_numpy(dtype=float)
+        dt_mov_go = unit_df["t_mov"].to_numpy(dtype=float) - unit_df["t_go"].to_numpy(
+            dtype=float
+        )
+
         t_go_stitched = 1.6 - dt_mov_go
         goCI = (t[None, :] >= t_go_stitched[:, None]).astype(float)
         goCI[~np.isfinite(t_go_stitched), :] = 0.0
         goCI = goCI.reshape(-1)
 
-        # design matrix
+        # Design matrix
         X = np.column_stack([E, H, T, cueCI, goCI])
 
         model = LinearRegression(fit_intercept=True)
         model.fit(X, y)
 
         colnames = ["E", "H", "T", "cueCI", "goCI"]
-        keep = [colnames.index(k) for k in ("E", "H", "T")]
+        keep = [colnames.index(k) for k in regressors]
+
         betas.append(model.coef_[keep])
 
     axes_raw = np.asarray(betas, dtype=float)
 
-    # QR orthogonalization, like standard TDR usage.
-    # Columns of Q are orthonormal population axes.
     axes_ortho = lowdin_orthogonalization(axes_raw)
 
     return axes_raw, axes_ortho, units

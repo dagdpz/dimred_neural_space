@@ -5,6 +5,19 @@ from itertools import product
 
 from scripts.utils import *
 
+plt.rcParams.update(
+    {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman"],
+        "axes.titlesize": 14,
+        "axes.labelsize": 12,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 10,
+        "figure.titlesize": 16,
+    }
+)
+
 CONDITION_COLORS = {
     # effector, reach_hand, target_hemifield
     ("reach", "ipsi", "ipsi"): "#005fbf",
@@ -16,6 +29,71 @@ CONDITION_COLORS = {
     ("saccade", "contra", "ipsi"): "#00ff00",
     ("saccade", "contra", "contra"): "#ff7f00",
 }
+
+
+def plot_rate_distributions_before_after(
+    raw_rates,
+    sqrt_rates,
+    norm_raw_rates,
+    norm_sqrt_rates,
+    *,
+    plots_dir=Path("plots/preprocessing"),
+):
+    """
+    Plot firing-rate distribution before and after sqrt + z-score normalization.
+    """
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_rates = np.concatenate(raw_rates).astype(float)
+    sqrt_rates = np.concatenate(sqrt_rates).astype(float)
+    norm_raw_rates = np.concatenate(norm_raw_rates).astype(float)
+    norm_sqrt_rates = np.concatenate(norm_sqrt_rates).astype(float)
+
+    raw_rates = raw_rates[np.isfinite(raw_rates)]
+    sqrt_rates = sqrt_rates[np.isfinite(sqrt_rates)]
+    norm_raw_rates = norm_raw_rates[np.isfinite(norm_raw_rates)]
+    norm_sqrt_rates = norm_sqrt_rates[np.isfinite(norm_sqrt_rates)]
+
+    norm_bins = np.linspace(
+        min(np.nanmin(norm_raw_rates), np.nanmin(norm_sqrt_rates)),
+        max(np.nanmax(norm_raw_rates), np.nanmax(norm_sqrt_rates)),
+        500,
+    )
+
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
+
+    axes[0, 0].hist(raw_rates, bins=100, edgecolor="black", alpha=0.75)
+    axes[0, 0].set_title("Raw firing rates")
+    axes[0, 0].set_xlabel("Firing rate (Hz)")
+    axes[0, 0].set_ylabel("Count")
+    axes[0, 0].grid(alpha=0.3)
+
+    axes[0, 1].hist(sqrt_rates, bins=100, edgecolor="black", alpha=0.75)
+    axes[0, 1].set_title("After sqrt transform")
+    axes[0, 1].set_xlabel("sqrt(rate)")
+    axes[0, 1].set_ylabel("Count")
+    axes[0, 1].grid(alpha=0.3)
+
+    axes[1, 0].hist(norm_raw_rates, bins=norm_bins, edgecolor="black", alpha=0.75)
+    axes[1, 0].set_title("Z-score without sqrt")
+    axes[1, 0].set_xlabel("Z-scored rate")
+    axes[1, 0].set_ylabel("Count")
+    axes[1, 0].set_xlim(-10, 10)
+    axes[1, 0].grid(alpha=0.3)
+
+    axes[1, 1].hist(norm_sqrt_rates, bins=norm_bins, edgecolor="black", alpha=0.75)
+    axes[1, 1].set_title("Sqrt + z-score")
+    axes[1, 1].set_xlabel("Z-scored sqrt(rate)")
+    axes[1, 1].set_ylabel("Count")
+    axes[1, 1].set_xlim(-10, 10)
+    axes[1, 1].grid(alpha=0.3)
+
+    fig.suptitle("Firing-rate distributions before and after normalization")
+
+    out_path = plots_dir / "rate_distribution_normalization_comparison.png"
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 def get_condition_color(row, condition_cols, fallback_color):

@@ -124,10 +124,6 @@ def main(seed=0):
     # ------------------------------------------------------------
     main_effect_regressors = ("E", "T", "H")
 
-    use_pca_denoising = False
-    pca_explained_variance = 0.8
-    pca_max_components = None
-
     axes_raw, axes_ortho, units = fit_tdr_axes(df, regressors=main_effect_regressors)
 
     # ------------------------------------------------------------
@@ -153,18 +149,6 @@ def main(seed=0):
             condition_cols=cols,
         )
 
-        if use_pca_denoising:
-            condition_pops[name], pca_info = pca_denoise_condition_population(
-                condition_pops[name],
-                explained_variance=pca_explained_variance,
-                max_components=pca_max_components,
-            )
-            print(
-                f"PCA denoising [{name}]: kept {pca_info['n_components']} PCs "
-                f"explaining {100 * pca_info['selected_explained_variance']:.2f}% "
-                "of condition-trajectory variance"
-            )
-
         projections_by[name], _ = project_trajectories(
             condition_pops[name],
             axes_ortho,
@@ -183,35 +167,9 @@ def main(seed=0):
         projections,
         stitched_time,
         axis_names,
-        y_axis="H",
-        z_axis="T",
-        y_label="Hand",
-        z_label="Space",
-        out_path=Path("plots/tdr/tdr_time_hand_space_8_conditions.html"),
-        downsample=2,
-    )
-
-    plot_tdr_time_hand_target_3d(
-        projections,
-        stitched_time,
-        axis_names,
-        y_axis="H",
-        z_axis="E",
-        y_label="Hand",
-        z_label="Effector",
-        out_path=Path("plots/tdr/tdr_time_hand_effector_8_conditions.html"),
-        downsample=2,
-    )
-
-    plot_tdr_time_hand_target_3d(
-        projections,
-        stitched_time,
-        axis_names,
-        y_axis="H",
-        z_axis="E",
-        y_label="Space",
-        z_label="Effector",
-        out_path=Path("plots/tdr/tdr_time_space_effector_8_conditions.html"),
+        hand_axis="H",
+        target_axis="T",
+        out_path=Path("plots/tdr/tdr_time_hand_target_8_conditions.html"),
         downsample=2,
     )
     exit()

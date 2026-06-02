@@ -1,73 +1,70 @@
-from itertools import product
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
-from dPCA import dPCA
 
 from scripts.preprocess import *
 from scripts.plotting import *
 from scripts.utils import *
 
 
-def main(seed=0):
+def main():
     """
     Load preprocessed trials, align spikes to cue, compute SDFs
     """
-    df = load_processed_trials()
+    df = load_processed_trials(normalized=True)
 
-    # --- Align spikes and event times to states
+    # ------------------------------------------------------------
+    # Event times
+    # ------------------------------------------------------------
     cue_state = 6
     mov_state = 68
-    cue_align = df.apply(
-        lambda row: trial_alignment_to_state(row, cue_state),
-        axis=1,
-    )
-    cue_align = cue_align.rename(
-        columns={
-            "t_state": "t_cue",
-            "arrival_times_rel": "arrival_times_cue",
-        }
-    )
-    mov_align = df.apply(
-        lambda row: trial_alignment_to_state(row, mov_state),
-        axis=1,
-    )
-    mov_align = mov_align.rename(
-        columns={
-            "t_state": "t_mov",
-            "arrival_times_rel": "arrival_times_mov",
-        }
-    )
-    df = pd.concat([df, cue_align, mov_align], axis=1)
-    print(df.columns)
 
-    # --- Spike density functions (Gaussian-smoothed Hz), time axis aligned to cue (state 6) ---
-    bin_size = 0.001  # 1 ms bins
-    sigma = 0.02  # 50 ms Gaussian smoothing
-    cue_sdf = df["arrival_times_cue"].apply(
-        lambda spikes: spike_times_to_sdf(
-            spikes,
+    df["t_cue"] = df.apply(
+        lambda row: get_state_onset(row["states_onset"], row["states"], cue_state),
+        axis=1,
+    )
+
+    df["t_mov"] = df.apply(
+        lambda row: get_state_onset(row["states_onset"], row["states"], mov_state),
+        axis=1,
+    )
+
+    # ------------------------------------------------------------
+    # Split existing SDF into cue- and movement-aligned windows
+    # ------------------------------------------------------------
+    bin_size = 0.001
+
+    cue_sdf = df.apply(
+        lambda row: slice_sdf_to_event(
+            row,
+            event_time_col="t_cue",
             t_start=-0.5,
             t_end=0.8,
             bin_size=bin_size,
-            sigma=sigma,
-        )
+        ),
+        axis=1,
     )
-    mov_sdf = df["arrival_times_mov"].apply(
-        lambda spikes: spike_times_to_sdf(
-            spikes,
+
+    mov_sdf = df.apply(
+        lambda row: slice_sdf_to_event(
+            row,
+            event_time_col="t_mov",
             t_start=-0.8,
             t_end=0.5,
             bin_size=bin_size,
-            sigma=sigma,
-        )
+        ),
+        axis=1,
     )
+
     df["sdf_time_cue"] = cue_sdf.apply(lambda x: x[0])
     df["sdf_rate_cue"] = cue_sdf.apply(lambda x: x[1])
+
     df["sdf_time_mov"] = mov_sdf.apply(lambda x: x[0])
     df["sdf_rate_mov"] = mov_sdf.apply(lambda x: x[1])
 
+    # ------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------
     for reach_hand in ("ipsi", "contra"):
         for target_hemifield in ("ipsi", "contra"):
             sub = df[
