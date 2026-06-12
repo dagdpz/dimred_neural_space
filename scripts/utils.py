@@ -132,17 +132,69 @@ def slice_sdf_to_event(
     return rel_time, aligned_rate
 
 
-def spike_times_to_sdf(spike_times, t_start, t_end, bin_size=0.001, sigma=0.05):
-    """Bin spikes, Gaussian-smooth counts, convert to Hz; returns (time_axis, rate) or NaN rate if spikes missing."""
-    if isinstance(spike_times, float) and np.isnan(spike_times):
-        time = np.arange(t_start, t_end, bin_size)
-        return time, np.full_like(time, np.nan, dtype=float)
-    spike_times = np.asarray(spike_times, dtype=float).ravel()
+def spike_times_to_sdf(
+    spike_times,
+    t_start,
+    t_end,
+    bin_size=0.001,
+    sigma=0.05,
+    truncate=4.0,
+):
+    """
+    Convert spike times to a spike-density function.
+
+    Parameters
+    ----------
+    spike_times : array-like
+        Spike times in seconds.
+    t_start, t_end : float
+        Start and end time of the SDF window, in seconds.
+    bin_size : float
+        Bin width in seconds.
+    sigma : float
+        Gaussian smoothing SD in seconds.
+    truncate : float
+        Gaussian kernel truncation in SDs.
+
+    Returns
+    -------
+    time : ndarray
+        Bin centers.
+    rate : ndarray
+        Smoothed firing rate in Hz.
+    """
+    if bin_size <= 0:
+        raise ValueError("bin_size must be positive.")
+    if sigma < 0:
+        raise ValueError("sigma must be non-negative.")
+    if t_end < t_start:
+        raise ValueError("t_end must be greater than t_start.")
+
     time_edges = np.arange(t_start, t_end + bin_size, bin_size)
     time = time_edges[:-1] + bin_size / 2
+
+    if spike_times is None:
+        return time, np.full_like(time, np.nan, dtype=float)
+
+    spike_times = np.asarray(spike_times, dtype=float).ravel()
+    spike_times = spike_times[np.isfinite(spike_times)]
+
+    if spike_times.size == 0:
+        return time, np.zeros_like(time, dtype=float)
+
     counts, _ = np.histogram(spike_times, bins=time_edges)
+
+    if sigma == 0:
+        return time, counts.astype(float) / bin_size
     sigma_bins = sigma / bin_size
-    smoothed_counts = gaussian_filter1d(counts.astype(float), sigma=sigma_bins)
+
+    smoothed_counts = gaussian_filter1d(
+        counts.astype(float),
+        sigma=sigma_bins,
+        mode="constant",
+        cval=0.0,
+        truncate=truncate,
+    )
     rate = smoothed_counts / bin_size
     return time, rate
 
@@ -151,6 +203,15 @@ def mean_sdf(series):
     """Mean SDF across trials in a group (same time bins); ignores NaNs per time point."""
     arr = np.stack(series.to_numpy())
     return np.nanmean(arr, axis=0)
+
+
+def is_valid_array(x):
+    try:
+        arr = np.asarray(x, dtype=float)
+    except Exception:
+        return False
+
+    return arr.ndim == 1 and arr.size > 0 and np.all(np.isfinite(arr))
 
 
 def mean_rate_from_series(series_list):

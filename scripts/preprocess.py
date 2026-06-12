@@ -58,6 +58,7 @@ def load_population_spike_data(filepath):
         for trial_idx in range(unit_trials.shape[0]):
             row = {
                 "unit_ID": unit_id,
+                "recorded_side": recorded_side,
                 "pulvinar_hemifield": pulvinar_hemifield,
                 "trial_index": trial_idx,
             }
@@ -94,8 +95,7 @@ def process_labels_and_filter(df):
     # Decode reach hand and convert to ipsi/contra relative to recorded pulvinar side
     reach_side = df["reach_hand"].apply(decode_reach_hand_label)
     df["reach_hand"] = [
-        ipsi_contra(side, ref)
-        for side, ref in zip(reach_side, df["pulvinar_hemifield"])
+        ipsi_contra(side, ref) for side, ref in zip(reach_side, df["recorded_side"])
     ]
 
     # Decode effector and remove joint saccade-reach trials
@@ -105,10 +105,8 @@ def process_labels_and_filter(df):
     # Convert target position to ipsi/contra hemifield
     target_side = df["tar_pos"].apply(tar_pos_to_side)
     df["target_hemifield"] = [
-        ipsi_contra(side, ref)
-        for side, ref in zip(target_side, df["pulvinar_hemifield"])
+        ipsi_contra(side, ref) for side, ref in zip(target_side, df["recorded_side"])
     ]
-
     # Remove trials without spike times
     df = df.dropna(subset=["arrival_times"])
 
@@ -153,6 +151,37 @@ def build_processed_trials(
     # Combine all sessions into one DataFrame
     df = pd.concat(sessions, ignore_index=True)
 
+    # ------------------------------------------------------------
+    # Plot trial_index counts
+    # ------------------------------------------------------------
+    trial_counts = df.groupby(by="unit_ID").count()["trial_index"]
+    avg_trials_per_unit = trial_counts.mean()
+    std_trials_per_unit = trial_counts.std()
+    median_trials_per_unit = trial_counts.median()
+
+    # print(f"Average number of trials per unit: {avg_trials_per_unit:.2f}")
+    # print(f"STD number of trials per unit: {std_trials_per_unit:.2f}")
+    # print(f"Median number of trials per unit: {median_trials_per_unit:.2f}")
+
+    if plot:
+        plots_dir = Path("plots/preprocessing")
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(16, 4))
+        ax.bar(trial_counts.index, trial_counts.values)
+        ax.set_xticks(np.arange(len(trial_counts.index)))
+        ax.set_xticklabels(
+            trial_counts.index,
+            rotation=90,
+            fontsize=6,
+        )
+        ax.set_xlabel("Unit")
+        ax.set_ylabel("Trial counts")
+        ax.set_title("Number of trials per unit")
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(plots_dir / "trial_counts.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
     # --- Process labels and filter ---
     df = process_labels_and_filter(df)
 
@@ -162,8 +191,42 @@ def build_processed_trials(
         time_col="sdf_time",
         rate_col="sdf_rate",
         bin_size=0.001,
-        sigma=0.02,
+        sigma=0.05,
     )
+
+    # ------------------------------------------------------------
+    # Plot 10 random SDFs
+    # ------------------------------------------------------------
+    if plot:
+        rng = np.random.default_rng(0)
+        valid_sdf = df[
+            df["sdf_time"].apply(lambda x: isinstance(x, np.ndarray) and len(x) > 0)
+            & df["sdf_rate"].apply(lambda x: isinstance(x, np.ndarray) and len(x) > 0)
+        ].copy()
+        n_plot = min(10, len(valid_sdf))
+        sample_idx = rng.choice(valid_sdf.index, size=n_plot, replace=False)
+        plots_dir = Path("plots/preprocessing")
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for idx in sample_idx:
+            row = valid_sdf.loc[idx]
+            t = np.asarray(row["sdf_time"], dtype=float)
+            r = np.asarray(row["sdf_rate"], dtype=float)
+            ax.plot(
+                t,
+                r,
+                lw=1.2,
+                alpha=0.8,
+                label=f"unit {row['unit_ID']}, trial {row['trial_index']}",
+            )
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Firing rate (Hz)")
+        ax.set_title("Random example SDFs")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=6, frameon=False, ncol=2)
+        fig.tight_layout()
+        fig.savefig(plots_dir / "random_10_sdfs.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
     # Remove rows with invalid/NaN/empty rates
     df = remove_invalid_rate_rows(
@@ -231,18 +294,10 @@ def remove_invalid_rate_rows(
     """
     df = df.copy()
 
-    def _valid_array(x):
-        try:
-            arr = np.asarray(x, dtype=float)
-        except Exception:
-            return False
-
-        return arr.ndim == 1 and arr.size > 0 and np.all(np.isfinite(arr))
-
-    valid = df[rate_col].apply(_valid_array)
+    valid = df[rate_col].apply(is_valid_array)
 
     if time_col in df.columns:
-        valid = valid & df[time_col].apply(_valid_array)
+        valid = valid & df[time_col].apply(is_valid_array)
 
     return df.loc[valid].reset_index(drop=True)
 
@@ -300,8 +355,8 @@ def add_sdfs(
     spike_col="arrival_times",
     time_col="sdf_time",
     rate_col="sdf_rate",
-    bin_size=0.005,
-    sigma=0.02,
+    bin_size=0.001,
+    sigma=0.05,
 ):
     """
     Compute raw SDFs for each row.

@@ -23,7 +23,8 @@ dependencies = [
     "numba",
     "matplotlib",
     "pandas",
-    "plotly"
+    "plotly",
+    "tqdm"
 ]
 
 [project.urls]

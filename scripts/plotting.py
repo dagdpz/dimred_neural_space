@@ -31,6 +31,100 @@ CONDITION_COLORS = {
 }
 
 
+def padded_range(v, pad_frac=0.08):
+    vmin = np.nanmin(v)
+    vmax = np.nanmax(v)
+    pad = pad_frac * (vmax - vmin)
+
+    if pad == 0:
+        pad = 1.0
+
+    return [vmin - pad, vmax + pad]
+
+
+def add_vertical_event_lines(
+    ax,
+    event_times=None,
+    *,
+    event_labels=None,
+    event_linestyles=None,
+    event_colors=None,
+    event_linewidths=None,
+    event_alphas=None,
+):
+    """
+    Draw one or more vertical event lines on an axis.
+
+    Parameters
+    ----------
+    event_times : list[float] or None
+        Times at which to draw vertical lines.
+
+    event_labels : list[str] or None
+        Labels for legend. Must match length of event_times if given.
+
+    event_linestyles : list[str] or None
+        Line styles, e.g. ["--", ":"]. Defaults to "--".
+
+    event_colors : list[str] or None
+        Line colors. Defaults to "k".
+
+    event_linewidths : list[float] or None
+        Line widths. Defaults to 1.0.
+
+    event_alphas : list[float] or None
+        Transparencies. Defaults to 0.8.
+    """
+    if event_times is None:
+        return
+
+    n = len(event_times)
+
+    if event_labels is None:
+        event_labels = [None] * n
+    if event_linestyles is None:
+        event_linestyles = ["--"] * n
+    if event_colors is None:
+        event_colors = ["k"] * n
+    if event_linewidths is None:
+        event_linewidths = [1.0] * n
+    if event_alphas is None:
+        event_alphas = [0.8] * n
+
+    for name, values in {
+        "event_labels": event_labels,
+        "event_linestyles": event_linestyles,
+        "event_colors": event_colors,
+        "event_linewidths": event_linewidths,
+        "event_alphas": event_alphas,
+    }.items():
+        if len(values) != n:
+            raise ValueError(
+                f"{name} must have same length as event_times. "
+                f"Got {len(values)} and {n}."
+            )
+
+    for t, label, ls, color, lw, alpha in zip(
+        event_times,
+        event_labels,
+        event_linestyles,
+        event_colors,
+        event_linewidths,
+        event_alphas,
+    ):
+        if t is None or not np.isfinite(t):
+            continue
+
+        ax.axvline(
+            float(t),
+            color=color,
+            linestyle=ls,
+            linewidth=lw,
+            alpha=alpha,
+            label=label,
+        )
+
+
 def plot_rate_distributions_before_after(
     raw_rates,
     sqrt_rates,
@@ -513,3 +607,97 @@ def _dpca_component_title(key, comp_idx, evr_dict):
     if ratios is not None and comp_idx < len(ratios):
         title += f" — var. expl. {ratios[comp_idx]:.3f}"
     return title
+
+
+def plot_random_shifted_sdfs(
+    df,
+    analysis_time,
+    *,
+    rate_col="analysis_rate",
+    unit_col="unit_ID",
+    trial_col="trial_index",
+    effector_col="effector",
+    n_plot=10,
+    seed=0,
+    event_times=None,
+    event_labels=None,
+    event_linestyles=None,
+    event_colors=None,
+    event_linewidths=None,
+    event_alphas=None,
+    out_path=Path("plots/tdr/random_10_sdfs_shifted.png"),
+    title="10 random SDFs, vertically shifted",
+    xlabel="Time (s)",
+    ylabel="Shifted normalized firing rate",
+):
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    analysis_time = np.asarray(analysis_time, dtype=float)
+    n_time = len(analysis_time)
+
+    rng = np.random.default_rng(seed)
+
+    valid_df = df[
+        df[rate_col].apply(
+            lambda x: (is_valid_array(x) and np.asarray(x, dtype=float).size == n_time)
+        )
+    ].copy()
+
+    if len(valid_df) == 0:
+        raise ValueError(f"No valid arrays found in {rate_col!r}.")
+
+    n_plot = min(n_plot, len(valid_df))
+    sample_idx = rng.choice(valid_df.index, size=n_plot, replace=False)
+
+    all_rates = np.stack(
+        [np.asarray(valid_df.loc[idx, rate_col], dtype=float) for idx in sample_idx]
+    )
+
+    y_range = np.nanmax(all_rates) - np.nanmin(all_rates)
+    offset_step = 0.45 * y_range if y_range > 0 else 1.0
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for i, idx in enumerate(sample_idx):
+        row = valid_df.loc[idx]
+        r = np.asarray(row[rate_col], dtype=float)
+        r_shifted = r + i * offset_step
+
+        label_parts = []
+        if unit_col in row:
+            label_parts.append(f"unit {row[unit_col]}")
+        if trial_col in row:
+            label_parts.append(f"trial {row[trial_col]}")
+        if effector_col in row:
+            label_parts.append(str(row[effector_col]))
+
+        ax.plot(
+            analysis_time,
+            r_shifted,
+            lw=1.2,
+            alpha=0.9,
+            label=", ".join(label_parts),
+        )
+
+    add_vertical_event_lines(
+        ax,
+        event_times=event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+    )
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=6, frameon=False, ncol=2)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return out_path

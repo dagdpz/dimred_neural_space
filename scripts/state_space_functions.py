@@ -1,58 +1,99 @@
 import numpy as np
+from itertools import product
+import pandas as pd
 
 
-def make_stitched_sdf(
+def stitch_sdfs(
     row,
     *,
-    cue_start=-0.5,
-    cue_end=0.6,
-    mov_start=-0.8,
-    mov_end=0.5,
+    period1=(-0.5, 0.8),
+    period2=(-0.8, 0.5),
+    col1=None,
+    col2=None,
+    time_col1=None,
+    time_col2=None,
 ):
     """
-    Returns one stitched SDF vector:
-        cue-aligned segment + movement-aligned segment
+    Stitch two event-aligned SDF segments into one vector.
 
-    The two pieces are not truly continuous in real time, but this gives
-    a common trial-length vector for TDR projection.
+    Example use:
+        period1 = cue-aligned window, e.g. (-0.5, 0.8)
+        period2 = movement-aligned window, e.g. (-0.8, 0.5)
+
+    The output is:
+        [SDF during period1, SDF during period2]
+
+    Important:
+        The two periods are concatenated for analysis/plotting convenience.
+        They are not assumed to be continuous in real time.
     """
-    t_cue = np.asarray(row["sdf_time_cue"], dtype=float)
-    r_cue = np.asarray(row["sdf_rate_cue"], dtype=float)
+    t_1 = np.asarray(row[time_col1], dtype=float)
+    r_1 = np.asarray(row[col1], dtype=float)
 
-    t_mov = np.asarray(row["sdf_time_mov"], dtype=float)
-    r_mov = np.asarray(row["sdf_rate_mov"], dtype=float)
+    t_2 = np.asarray(row[time_col2], dtype=float)
+    r_2 = np.asarray(row[col2], dtype=float)
 
-    cue_mask = (t_cue >= cue_start) & (t_cue <= cue_end)
-    mov_mask = (t_mov >= mov_start) & (t_mov <= mov_end)
+    mask1 = (t_1 >= period1[0]) & (t_1 <= period1[1])
+    mask2 = (t_2 >= period2[0]) & (t_2 <= period2[1])
 
-    stitched_rate = np.concatenate([r_cue[cue_mask], r_mov[mov_mask]])
+    stitched_rate = np.concatenate([r_1[mask1], r_2[mask2]])
 
     return stitched_rate
 
 
-def make_stitched_time(
-    example_row, *, cue_start=-0.5, cue_end=0.6, mov_start=-0.8, mov_end=0.5
+def stitch_time(
+    row, *, period1=(-0.5, 0.8), period2=(-0.8, 0.5), time_col1=None, time_col2=None
 ):
     """
-    Creates artificial plot time.
+    Create an artificial time axis for stitched SDFs.
 
-    The movement segment is shifted to appear after the cue segment.
-    Use a visual gap so the plot does not imply true continuity.
+    The first period keeps its original event-aligned time.
+    The second period is shifted so that it starts immediately after period1.
+
+    Example:
+        period1: cue-aligned time from -0.5 to 0.8 s
+        period2: movement-aligned time from -0.8 to 0.5 s
+
+    The returned stitched time is useful for plotting and regression, but it
+    should not be interpreted as a continuous real trial time axis.
+
+    Returns
+    -------
+    stitched_t : array
+        Artificial stitched time axis.
+    stitch_x : float
+        Boundary between period1 and period2.
+    t_1 : array
+        Selected time points from period1.
+    t_2_shifted : array
+        Selected and shifted time points from period2.
     """
-    t_cue = np.asarray(example_row["sdf_time_cue"], dtype=float)
-    t_mov = np.asarray(example_row["sdf_time_mov"], dtype=float)
+    t_1 = np.asarray(row[time_col1], dtype=float)
+    t_2 = np.asarray(row[time_col2], dtype=float)
 
-    cue_mask = (t_cue >= cue_start) & (t_cue <= cue_end)
-    mov_mask = (t_mov >= mov_start) & (t_mov <= mov_end)
+    mask1 = (t_1 >= period1[0]) & (t_1 <= period1[1])
+    mask2 = (t_2 >= period2[0]) & (t_2 <= period2[1])
 
-    cue_t = t_cue[cue_mask]
-    mov_t_raw = t_mov[mov_mask]
-    dt = np.nanmedian(np.diff(cue_t))
+    t_1 = t_1[mask1]
+    t_2 = t_2[mask2]
 
-    mov_t = mov_t_raw - mov_t_raw[0] + cue_t[-1] + dt
-    stitched_t = np.concatenate([cue_t, mov_t])
-    stitch_x = cue_t[-1]
-    return stitched_t, stitch_x, cue_t, mov_t
+    if t_1.size == 0:
+        raise ValueError(f"No time points found in period1={period1}")
+    if t_2.size == 0:
+        raise ValueError(f"No time points found in period2={period2}")
+    if t_1.size < 2:
+        raise ValueError("period1 needs at least two time points to estimate dt.")
+
+    # Estimate time-bin spacing from the first segment
+    dt = np.nanmedian(np.diff(t_1))
+
+    # Shift period2 so that it starts right after period1
+    t_2_shifted = t_2 - t_2[0] + t_1[-1] + dt
+
+    # Concatenate the original period1 time and shifted period2 time
+    stitched_t = np.concatenate([t_1, t_2_shifted])
+    stitch_x = t_1[-1]
+    return stitched_t, stitch_x, t_1, t_2_shifted
 
 
 def condition_mean_population(
@@ -61,29 +102,99 @@ def condition_mean_population(
     *,
     condition_cols=("effector", "reach_hand", "target_hemifield"),
     unit_cols=("session", "unit_ID"),
+    rate_col="analysis_rate",
 ):
     """
     Builds condition-averaged pseudo-population trajectories.
 
+    For each condition:
+        1. average trials within each unit
+        2. stack units into a population matrix
+
     Output:
-        dict mapping condition tuple -> array of shape units x time
+        dict mapping condition tuple -> array of shape n_units x n_time
     """
     out = {}
-    grouped = df.dropna(subset=list(condition_cols) + ["stitched_rate"]).groupby(
-        list(condition_cols)
-    )
+    df = df.dropna(subset=list(condition_cols) + [rate_col]).copy()
+    grouped = df.groupby(list(condition_cols), sort=True)
+
+    # Get time length from first valid stitched_rate
+    example_rate = np.asarray(df[rate_col].iloc[0], dtype=float)
+    n_time = example_rate.size
 
     for cond, cond_df in grouped:
         pop = []
-
         for unit in units:
             unit_df = cond_df.copy()
             for col, val in zip(unit_cols, unit):
                 unit_df = unit_df[unit_df[col] == val]
-            rates = np.stack(unit_df["stitched_rate"].to_numpy())
+
+            # If this unit has no trials in this condition,
+            # fill with NaNs instead of crashing.
+            if len(unit_df) == 0:
+                pop.append(np.full(n_time, np.nan))
+                continue
+            rates = np.stack(unit_df[rate_col].to_numpy()).astype(float)
+
+            # Mean across trials for this unit-condition
             pop.append(np.nanmean(rates, axis=0))
         out[cond] = np.stack(pop, axis=0)
     return out
+
+
+def count_rows_per_unit_condition(
+    df,
+    *,
+    unit_cols=("session", "unit_ID"),
+    condition_cols=("effector", "reach_hand", "target_hemifield"),
+    effector_levels=("reach", "saccade"),
+    hand_levels=("ipsi", "contra"),
+    target_levels=("ipsi", "contra"),
+):
+    """
+    Count how many rows/trials each unit has for each condition.
+
+    Includes rows with n_rows = 0 when a unit has no trials
+    for a condition.
+
+    Returns:
+        counts_long: one row per unit-condition
+    """
+
+    # Existing unit list
+    units = df[list(unit_cols)].drop_duplicates().sort_values(list(unit_cols))
+
+    # All 8 task conditions
+    conditions = pd.DataFrame(
+        list(product(effector_levels, hand_levels, target_levels)),
+        columns=list(condition_cols),
+    )
+
+    # Cartesian product: every unit x every condition
+    full_index = (
+        units.assign(_key=1)
+        .merge(conditions.assign(_key=1), on="_key")
+        .drop(columns="_key")
+    )
+
+    # Actual counts
+    counts = (
+        df.groupby(list(unit_cols) + list(condition_cols))
+        .size()
+        .rename("n_rows")
+        .reset_index()
+    )
+
+    # Add missing unit-condition rows as 0
+    counts_long = full_index.merge(
+        counts,
+        on=list(unit_cols) + list(condition_cols),
+        how="left",
+    ).fillna({"n_rows": 0})
+
+    counts_long["n_rows"] = counts_long["n_rows"].astype(int)
+
+    return counts_long
 
 
 def project_trajectories(condition_pop, axes_q, regressors):
@@ -204,3 +315,68 @@ def pca_denoise_condition_population(
         "selected_explained_variance": float(cumulative[n_components - 1]),
     }
     return denoised_pop, info
+
+
+def trajectory_euclidean_distance(traj1, traj2, *, axis=None, axis_names=None):
+    """
+    Compute Euclidean distance between two trajectories in TDR space.
+
+    Parameters
+    ----------
+    traj1, traj2 : array-like
+        Trajectories with shape:
+            n_axes x n_time
+
+    axis_names : list[str] or None
+        Required if axis is not None.
+
+    summary : {"mean", "sum", "max", None}
+
+    Returns
+    -------
+    dist : float or ndarray
+        array of shape n_time
+    """
+    traj1 = np.asarray(traj1, dtype=float)
+    traj2 = np.asarray(traj2, dtype=float)
+    if traj1.shape != traj2.shape:
+        raise ValueError(
+            f"traj1 and traj2 must have same shape. "
+            f"Got {traj1.shape} and {traj2.shape}."
+        )
+
+    if traj1.ndim != 2:
+        raise ValueError(
+            f"Trajectories must have shape n_axes x n_time. Got {traj1.shape}."
+        )
+
+    diff = traj1 - traj2
+    dist_t = np.sqrt(np.nansum(diff**2, axis=0))
+    return dist_t
+
+
+def average_projected_trajectory_by_factor(
+    projections,
+    *,
+    condition_cols=("effector", "reach_hand", "target_hemifield"),
+    factor="effector",
+    level="saccade",
+):
+    """
+    Average projected trajectories across all conditions matching one factor level.
+    Example:
+        factor="target_hemifield", level="ipsi"
+        averages all trajectories with target_hemifield == "ipsi",
+        across effector and reach_hand.
+
+    Returns
+    -------
+    mean_traj : ndarray
+        Mean projected trajectory for this factor level.
+    """
+    factor_idx = condition_cols.index(factor)
+    matched = []
+    for cond, traj in projections.items():
+        if cond[factor_idx] == level:
+            matched.append(np.asarray(traj, dtype=float))
+    return np.nanmean(np.stack(matched, axis=0), axis=0)
