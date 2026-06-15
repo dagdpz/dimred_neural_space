@@ -145,7 +145,7 @@ def condition_mean_population(
 def count_rows_per_unit_condition(
     df,
     *,
-    unit_cols=("session", "unit_ID"),
+    unit_cols=("unit_ID",),
     condition_cols=("effector", "reach_hand", "target_hemifield"),
     effector_levels=("reach", "saccade"),
     hand_levels=("ipsi", "contra"),

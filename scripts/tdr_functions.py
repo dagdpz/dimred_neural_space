@@ -6,26 +6,156 @@ import matplotlib.pyplot as plt
 from scripts.utils import *
 
 
-def add_tdr_regressors(df, interaction=False):
+def add_condition_independent_regressors(
+    df,
+    *,
+    time_col="analysis_time",
+    cue_time=0.0,
+    go_time=1.3,
+    mov_time_col=None,
+    cue_duration=0.150,
+):
     """
-    Binary coding:
-        effector: reach=+1, saccade=-1
-        target/space: ipsi=-1, contra=1
-        hand: ipsi=-1, contra=1
+    Add condition-independent, time-dependent regressors.
 
-    Interactions:
-        EH = effector x hand
-        ET = effector x target/space
+    Each new regressor is stored as a 1D array with the same length as
+    `analysis_time`.
+
+    cueCI:
+        cue period only.
+
+    prepCI:
+        after cue period until movement onset.
+
+    movCI:
+        from movement onset onward.
     """
     df = df.copy()
 
-    df["E"] = df["effector"].map({"reach": 1.0, "saccade": -1.0})
-    df["T"] = df["target_hemifield"].map({"contra": 1.0, "ipsi": -1.0})
-    df["H"] = df["reach_hand"].map({"contra": 1.0, "ipsi": -1.0})
+    if len(df) == 0:
+        raise ValueError("Cannot add CI regressors to an empty dataframe.")
 
-    if interaction:
-        df["EH"] = df["E"] * df["H"]
-        df["ET"] = df["E"] * df["T"]
+    if mov_time_col is None:
+        raise ValueError("mov_time_col is required to define prepCI and movCI.")
+
+    cueCI = []
+    goCI = []
+    prepCI = []
+    movCI = []
+
+    for _, row in df.iterrows():
+        t = np.asarray(row[time_col], dtype=float)
+
+        if t.ndim != 1 or t.size == 0 or not np.all(np.isfinite(t)):
+            cueCI.append(np.full(0, np.nan))
+            prepCI.append(np.full(0, np.nan))
+            movCI.append(np.full(0, np.nan))
+            continue
+
+        t_mov = row[mov_time_col]
+
+        if not np.isfinite(t_mov):
+            cueCI.append(np.zeros_like(t, dtype=float))
+            prepCI.append(np.zeros_like(t, dtype=float))
+            movCI.append(np.zeros_like(t, dtype=float))
+            continue
+
+        t_mov = float(t_mov)
+
+        cueCI.append(((t >= cue_time) & (t < cue_time + cue_duration)).astype(float))
+        goCI.append(((t >= go_time) & (t < t_mov)).astype(float))
+
+        prepCI.append(((t >= cue_time + cue_duration) & (t < t_mov)).astype(float))
+
+        movCI.append((t >= t_mov).astype(float))
+
+    df["cueCI"] = cueCI
+    df["goCI"] = goCI
+    df["prepCI"] = prepCI
+    df["movCI"] = movCI
+
+    return df
+
+
+def add_effector_regressors(df):
+    """
+    Add effector regressors.
+
+    Columns:
+        saccade:
+            1 for saccade trials, 0 otherwise
+
+        ipsi_hand:
+            1 for reach trials with ipsi hand, 0 otherwise
+
+        contra_hand:
+            1 for reach trials with contra hand, 0 otherwise
+
+    These are scalar trial-level regressors.
+    """
+    df = df.copy()
+
+    required_cols = ["effector", "reach_hand"]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns required for action regressors: {missing}")
+
+    df["saccade"] = (df["effector"] == "saccade").astype(float)
+
+    df["ipsi_hand"] = (
+        (df["effector"] == "reach") & (df["reach_hand"] == "ipsi")
+    ).astype(float)
+
+    df["contra_hand"] = (
+        (df["effector"] == "reach") & (df["reach_hand"] == "contra")
+    ).astype(float)
+
+    return df
+
+
+def mask_regressors(
+    df,
+    *,
+    regressors,
+    ci_col,
+    suffix=None,
+):
+    """
+    Convert scalar trial-level regressors into time-dependent regressors
+    by multiplying each scalar value by a CI mask.
+
+    Example:
+        saccade_masked[t] = saccade * movCI[t]
+
+    Parameters
+    ----------
+    regressors : list or tuple
+        Scalar regressor columns to mask.
+
+    ci_col : str
+        Column containing 1D CI mask arrays.
+
+    suffix : str or None
+        If None, overwrite the original columns.
+        If given, save as f"{reg}{suffix}".
+    """
+    df = df.copy()
+
+    required_cols = list(regressors) + [ci_col]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns for masking: {missing}")
+
+    for reg in regressors:
+        out_col = reg if suffix is None else f"{reg}{suffix}"
+
+        masked = []
+        for _, row in df.iterrows():
+            mask = np.asarray(row[ci_col], dtype=float)
+            value = float(row[reg])
+            masked.append(value * mask)
+
+        df[out_col] = masked
 
     return df
 
@@ -64,29 +194,34 @@ def lowdin_orthogonalization(A, tol=1e-12):
 def fit_tdr_axes(
     df,
     *,
-    unit_cols=("session", "unit_ID"),
-    no_interaction=False,
-    main_regressors=("E", "T", "H"),
-    interaction_regressors=("EH", "ET"),
+    unit_cols=("unit_ID",),
+    regressors=("E", "T", "H"),
     rate_col="analysis_rate",
     time_col="analysis_time",
-    cue_time_col="t_cue",
-    go_time_col="t_go",
-    include_ci_axes=False,
 ):
     """
-    Fits one regression per unit.
+    Fit one multilinear regression per unit.
 
-    If include_ci_axes=False:
-        returns only task axes: E, T, H, optionally EH, ET
+    Each regressor can be either:
+        - array-valued: one vector per trial, length n_time
+        - scalar-valued: one value per trial, repeated over time
 
-    If include_ci_axes=True:
-        returns task axes plus condition-independent axes:
-            E, T, H, EH, ET, cueCI, goCI
+    Returns
+    -------
+    axes_raw : ndarray, shape n_units x n_regressors
+        Raw regression beta vectors.
+
+    axes_ortho : ndarray, shape n_units x n_regressors
+        Orthogonalized TDR axes.
+
+    units_used : list
+        Units retained in the regression.
+
+    task_regressors : tuple
+        Names of returned axes.
     """
-    task_regressors = tuple(main_regressors)
-    if not no_interaction:
-        task_regressors = task_regressors + tuple(interaction_regressors)
+    task_regressors = tuple(regressors)
+
     units = (
         df[list(unit_cols)]
         .drop_duplicates()
@@ -97,7 +232,6 @@ def fit_tdr_axes(
 
     betas = []
     units_used = []
-    returned_regressors = None
 
     for unit in units:
         unit_df = df.copy()
@@ -106,113 +240,88 @@ def fit_tdr_axes(
             unit_df = unit_df[unit_df[col] == val]
 
         required_cols = list(task_regressors) + [rate_col, time_col]
-        if cue_time_col is not None and cue_time_col in unit_df.columns:
-            required_cols.append(cue_time_col)
-        if go_time_col is not None and go_time_col in unit_df.columns:
-            required_cols.append(go_time_col)
-
         unit_df = unit_df.dropna(subset=required_cols)
+
         if len(unit_df) == 0:
             continue
 
-        # Shape: n_trials x n_timepoints
+        # ------------------------------------------------------------
+        # Response matrix: trials x time
+        # ------------------------------------------------------------
         rates = np.stack(unit_df[rate_col].to_numpy()).astype(float)
-        if not np.all(np.isfinite(rates)):
+
+        if rates.ndim != 2 or not np.all(np.isfinite(rates)):
             continue
+
+        n_trials, n_time = rates.shape
 
         # Regression target:
         # one row per trial-timepoint
         y = rates.reshape(-1)
 
-        # Trial-level task regressors repeated across time
-        n_trials, n_time = rates.shape
-
-        # ------------------------------------------------------------
-        # Condition-Independent Regressors
-        # ------------------------------------------------------------
-        t = np.asarray(unit_df[time_col].iloc[0], dtype=float)
-
-        ci_regressors = []
-        regressor_values = {}
-
-        if cue_time_col is not None and cue_time_col in unit_df.columns:
-            t_cue_analysis = unit_df[cue_time_col].to_numpy(dtype=float)
-            cue_window = 0.150  # Have to define concretely using TGM
-            cueCI = (
-                (t[None, :] >= t_cue_analysis[:, None])
-                & (t[None, :] < t_cue_analysis[:, None] + cue_window)
-            ).astype(float)
-            print(cueCI)
-
-            plt.plot(cueCI[0])
-            plt.show()
-            exit()
-            cueCI[~np.isfinite(t_cue_analysis), :] = 0.0
-
-            regressor_values["cueCI"] = cueCI.reshape(-1)
-            ci_regressors.append("cueCI")
-
-        if go_time_col is not None and go_time_col in unit_df.columns:
-            t_go_analysis = unit_df[go_time_col].to_numpy(dtype=float)
-
-            goCI = (t[None, :] >= t_go_analysis[:, None]).astype(float)
-            goCI[~np.isfinite(t_go_analysis), :] = 0.0
-
-            regressor_values["goCI"] = goCI.reshape(-1)
-            ci_regressors.append("goCI")
-
-        # ------------------------------------------------------------
-        # Time-dependent Masks
-        # ------------------------------------------------------------
-
         # ------------------------------------------------------------
         # Design matrix
         # ------------------------------------------------------------
-        all_regressors = task_regressors + tuple(ci_regressors)
+        X_cols = []
 
         for reg in task_regressors:
-            regressor_values[reg] = np.repeat(
-                unit_df[reg].to_numpy(dtype=float),
-                n_time,
+            first_val = unit_df[reg].iloc[0]
+
+            # Array-valued time-dependent regressor
+            if isinstance(first_val, (np.ndarray, list, tuple)):
+                X_reg = np.stack(unit_df[reg].to_numpy()).astype(float)
+                if X_reg.shape != rates.shape:
+                    raise ValueError(
+                        f"Regressor {reg!r} has shape {X_reg.shape}, "
+                        f"but rates have shape {rates.shape}. "
+                        "Each time-dependent regressor must have one array per trial "
+                        "with the same length as analysis_rate."
+                    )
+                if not np.all(np.isfinite(X_reg)):
+                    raise ValueError(f"Regressor {reg!r} contains non-finite values.")
+                X_cols.append(X_reg.reshape(-1))
+            # Scalar trial-level regressor
+            else:
+                values = unit_df[reg].to_numpy(dtype=float)
+
+                if not np.all(np.isfinite(values)):
+                    raise ValueError(f"Regressor {reg!r} contains non-finite values.")
+
+                X_cols.append(np.repeat(values, n_time))
+
+        X = np.column_stack(X_cols)
+        if X.shape[0] != y.shape[0]:
+            raise ValueError(
+                f"Design matrix has {X.shape[0]} rows, " f"but y has {y.shape[0]} rows."
             )
 
-        X = np.column_stack([regressor_values[reg] for reg in all_regressors])
+        # Skip units with rank-deficient or all-zero design only if needed.
+        # Usually LinearRegression can still fit, but beta interpretation
+        # may be poor if a regressor is always zero for this unit.
+        if not np.all(np.isfinite(X)):
+            continue
 
-        model = LinearRegression(fit_intercept=True)
+        # ------------------------------------------------------------
+        # Fit regression for this unit
+        # ------------------------------------------------------------
+        model = LinearRegression()
         model.fit(X, y)
 
-        # ------------------------------------------------------------
-        # Keep task axes only, or task + CI axes
-        # ------------------------------------------------------------
-        coef = pd.Series(
-            model.coef_,
-            index=all_regressors,
-            dtype=float,
-        )
-        if include_ci_axes:
-            returned_regressors_this_unit = all_regressors
-        else:
-            returned_regressors_this_unit = task_regressors
-
-        if returned_regressors is None:
-            returned_regressors = returned_regressors_this_unit
-        elif returned_regressors != returned_regressors_this_unit:
-            raise ValueError(
-                "Different units produced different regressor sets. "
-                f"Expected {returned_regressors}, got {returned_regressors_this_unit}."
-            )
-
-        betas.append(coef.loc[list(returned_regressors)].to_numpy())
+        beta = np.asarray(model.coef_, dtype=float)
+        betas.append(beta)
         units_used.append(unit)
 
-    axes_raw = np.asarray(betas, dtype=float)
+    if len(betas) == 0:
+        raise ValueError("No units were successfully fit.")
 
-    if axes_raw.size == 0:
-        raise ValueError("No valid units were available for fitting TDR axes.")
+    axes_raw = np.stack(betas, axis=0)
 
+    # ------------------------------------------------------------
+    # Orthogonalize axes
+    # ------------------------------------------------------------
     axes_ortho = lowdin_orthogonalization(axes_raw)
 
-    return axes_raw, axes_ortho, units_used, returned_regressors
+    return axes_raw, axes_ortho, units_used, task_regressors
 
 
 def summarize_tdr_beta_effect_sizes(
