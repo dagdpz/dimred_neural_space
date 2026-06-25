@@ -101,7 +101,7 @@ def condition_mean_population(
     units,
     *,
     condition_cols=("effector", "reach_hand", "target_hemifield"),
-    unit_cols=("session", "unit_ID"),
+    unit_cols=("unit_ID",),
     rate_col="analysis_rate",
 ):
     """
@@ -145,32 +145,41 @@ def condition_mean_population(
 def count_rows_per_unit_condition(
     df,
     *,
-    unit_cols=("unit_ID",),
+    unit_cols=("session", "unit_ID"),
     condition_cols=("effector", "reach_hand", "target_hemifield"),
-    effector_levels=("reach", "saccade"),
-    hand_levels=("ipsi", "contra"),
-    target_levels=("ipsi", "contra"),
+    condition_levels=None,
 ):
     """
-    Count how many rows/trials each unit has for each condition.
+    Count rows/trials for every unit x condition combination.
 
     Includes rows with n_rows = 0 when a unit has no trials
     for a condition.
 
-    Returns:
-        counts_long: one row per unit-condition
+    Works for:
+        condition_cols=("effector",)
+        condition_cols=("effector", "reach_hand", "target_hemifield")
+        etc.
     """
+    if condition_levels is None:
+        default_levels = {
+            "effector": ("reach", "saccade"),
+            "reach_hand": ("ipsi", "contra"),
+            "target_hemifield": ("ipsi", "contra"),
+            "space": ("ipsi", "contra"),
+        }
+
+        condition_levels = {col: default_levels[col] for col in condition_cols}
 
     # Existing unit list
     units = df[list(unit_cols)].drop_duplicates().sort_values(list(unit_cols))
 
-    # All 8 task conditions
+    # All requested condition combinations
     conditions = pd.DataFrame(
-        list(product(effector_levels, hand_levels, target_levels)),
+        list(product(*[condition_levels[col] for col in condition_cols])),
         columns=list(condition_cols),
     )
 
-    # Cartesian product: every unit x every condition
+    # Cartesian product: every unit x every requested condition
     full_index = (
         units.assign(_key=1)
         .merge(conditions.assign(_key=1), on="_key")
@@ -185,7 +194,7 @@ def count_rows_per_unit_condition(
         .reset_index()
     )
 
-    # Add missing unit-condition rows as 0
+    # Fill missing unit-condition rows with 0
     counts_long = full_index.merge(
         counts,
         on=list(unit_cols) + list(condition_cols),

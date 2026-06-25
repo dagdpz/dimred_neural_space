@@ -17,7 +17,7 @@ def main(
     no_interaction=False,
     use_pca_denoising=False,
     plot=False,
-    plots_dir=Path("plots/tdr"),
+    plots_dir=Path("plots/tdr_int_cue"),
 ):
     """
     Load preprocessed trials, align spikes to cue, compute SDFs, then run TDR.
@@ -25,42 +25,65 @@ def main(
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_processed_trials(normalized=True)
+    df = load_processed_trials(path=Path("data/old_data/processed_trials.pkl"))
 
     # ------------------------------------------------------------
-    # Get time of onset of MOV
+    # Get time of onset of CUE, MOV and GO
     # ------------------------------------------------------------
+    cue_state = 6
     mov_state = 68
+    mov_end_state = 69
     go_state = 4
-    df["t_mov"] = df.apply(
-        lambda row: get_state_onset(row["states_onset"], row["states"], mov_state),
+    df["t_cue"] = df.apply(
+        lambda row: get_state_onset(row["states_onset"], row["states"], cue_state),
         axis=1,
     )
     df["t_go"] = df.apply(
         lambda r: get_state_onset(r["states_onset"], r["states"], go_state),
         axis=1,
     )
+    df["t_mov"] = df.apply(
+        lambda row: get_state_onset(row["states_onset"], row["states"], mov_state),
+        axis=1,
+    )
+    df["t_mov_end"] = df.apply(
+        lambda row: get_state_onset(row["states_onset"], row["states"], mov_end_state),
+        axis=1,
+    )
 
     # ------------------------------------------------------------
-    # Aligned analysis window: -0.5 to 0.5 s after MVO
+    # Cue-aligned analysis window: -0.5 to 2.0 s after cue
     # ------------------------------------------------------------
     bin_size = 0.001
-    mov_sdf = df.apply(
+    cue_sdf = df.apply(
         lambda row: slice_sdf_to_event(
             row,
-            event_time_col="t_mov",
+            event_time_col="t_cue",
             t_start=-0.5,
-            t_end=0.5,
+            t_end=2.0,
             bin_size=bin_size,
         ),
         axis=1,
     )
 
-    df["analysis_time"] = mov_sdf.apply(lambda x: x[0])
-    df["analysis_rate"] = mov_sdf.apply(lambda x: x[1])
+    df["analysis_time"] = cue_sdf.apply(lambda x: x[0])
+    df["analysis_rate"] = cue_sdf.apply(lambda x: x[1])
 
     # ------------------------------------------------------------
-    # Remove rows with NaNs in movement SDFs
+    # Align other event times to cue
+    # ------------------------------------------------------------
+    df["t_mov"] = df["t_mov"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
+
+    df["t_mov_end"] = df["t_mov_end"].to_numpy(dtype=float) - df["t_cue"].to_numpy(
+        dtype=float
+    )
+
+    df["t_go"] = df["t_go"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
+
+    df["t_cue"] = 0.0
+
+    # ------------------------------------------------------------
+    # Remove rows with NaNs in cue or movement SDFs
     # ------------------------------------------------------------
     before = len(df)
     df = df[
@@ -79,20 +102,34 @@ def main(
     )
 
     # ------------------------------------------------------------
+    # Common event markers for plots
+    # ------------------------------------------------------------
+    event_times = [
+        0.0,
+        np.nanmedian(df["t_go"]),
+    ]
+    event_labels = ["Cue", "GO"]
+    event_colors = ["k", "k"]
+    event_opacities = [0.04, 0.04]
+    event_linestyles = ["--", ":"]
+    event_linewidths = [1.2, 1.2]
+    event_alphas = [0.7, 0.8]
+
+    # ------------------------------------------------------------
     # Plot 10 random SDFs, vertically shifted
     # ------------------------------------------------------------
     if plot:
         plot_random_shifted_sdfs(
             df,
             analysis_time,
-            event_times=[0.0],
-            event_labels=["MOV"],
-            event_linestyles=["--"],
-            event_colors=["k"],
-            event_linewidths=[1.2],
-            event_alphas=[0.7],
+            event_times=event_times,
+            event_labels=event_labels,
+            event_linestyles=event_linestyles,
+            event_colors=event_colors,
+            event_linewidths=event_linewidths,
+            event_alphas=event_alphas,
             out_path=plots_dir / "random_10_sdfs_shifted.png",
-            xlabel="Time relative to MOV onset (s)",
+            xlabel="Time relative to cue onset (s)",
         )
 
     # ------------------------------------------------------------
@@ -127,8 +164,10 @@ def main(
         "reach_hand",
         "effector",
         "target_hemifield",
+        "t_cue",
         "t_mov",
         "t_go",
+        "t_mov_end",
         "analysis_rate",
         "analysis_time",
     ]
@@ -137,14 +176,19 @@ def main(
     # ------------------------------------------------------------
     # Regressors
     # ------------------------------------------------------------
-    df = add_tdr_regressors(df, interaction=True)
+    df = add_tdr_int_regressors(df, interaction=True)
+
+    df = add_condition_independent_regressors(df)
 
     drop_cols = [
         "E",
         "T",
         "H",
+        "t_cue",
         "t_mov",
         "t_go",
+        "cueCI",
+        "goCI",
         "analysis_rate",
         "analysis_time",
     ]
@@ -160,16 +204,47 @@ def main(
     # ------------------------------------------------------------
     # Fit TDR axes
     # ------------------------------------------------------------
-    main_regressors = ("E", "T", "H")
+    regressors = ("E", "T", "H", "cueCI", "goCI")
     interaction_regressors = ("EH", "ET")
 
     axes_raw, axes_ortho, units, task_regressors = fit_tdr_axes(
         df,
-        main_regressors=main_regressors,
+        regressors=regressors,
         interaction_regressors=interaction_regressors,
-        no_interaction=no_interaction,
-        cue_time_col=None,
+        no_interaction=False,
+        rate_col="analysis_rate",
+        time_col="analysis_time",
     )
+
+    # ------------------------------------------------------------
+    # TDR beta/effect-size statistics
+    # ------------------------------------------------------------
+    beta_unit_stats, beta_summary, beta_axis_summary = summarize_tdr_beta_effect_sizes(
+        axes_raw,
+        task_regressors,
+        units=units,
+    )
+
+    beta_unit_stats.to_csv(
+        plots_dir / "tdr_beta_effect_sizes_by_unit.csv",
+        index=False,
+    )
+
+    beta_summary.to_csv(
+        plots_dir / "tdr_beta_effect_size_summary.csv",
+        index=False,
+    )
+
+    beta_axis_summary.to_csv(
+        plots_dir / "tdr_beta_axis_strength_summary.csv",
+        index=False,
+    )
+
+    print("\nTDR beta effect-size summary:")
+    print(beta_summary)
+
+    print("\nTDR raw axis strength:")
+    print(beta_axis_summary)
 
     # ------------------------------------------------------------
     # Condition-averaged trajectories + projections
@@ -219,31 +294,54 @@ def main(
     condition_pop = condition_pops["all_conditions"]
     projections = projections_by["all_conditions"]
 
-    """ tdr_var_time = time_resolved_variance_explained_by_tdr_axes(
+    axis_names = list(task_regressors)
+
+    # ------------------------------------------------------------
+    # 1) Task + CI variance explained
+    # ------------------------------------------------------------
+    tdr_var_time = time_resolved_var_by_tdr_axes(
         condition_pop,
         axes_ortho,
         axis_names,
         analysis_time,
+        center_across_conditions=False,
     )
 
     tdr_var_time.to_csv(
-        plots_dir / "tdr_axis_variance_explained_time_resolved.csv",
+        plots_dir / "tdr_axis_variance_explained_task_plus_CI_time_resolved.csv",
         index=False,
-    ) """
+    )
+
+    plot_tdr_axis_var_time_resolved(
+        tdr_var_time,
+        out_path=plots_dir / "tdr_axis_variance_explained.png",
+        title="Task + CI axis variance explained over time",
+        xlabel="Time relative to cue onset (s)",
+        ylabel="Variance explained",
+        y_col="variance_explained",
+        axis_order=["cueCI", "goCI", "T", "H", "E", "ET", "EH"],
+        event_times=event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+        downsample=2,
+    )
 
     # ------------------------------------------------------------
     # Simple population averages of model input
     # ------------------------------------------------------------
-
-    # Common event markers for plots
-    event_times = [0.0]
-    event_labels = ["MOV"]
-    event_colors = ["0.25"]
-    event_opacities = [0.04]
-    event_linestyles = ["--"]
-    event_linewidths = [1.0]
-    event_alphas = [0.7]
-
+    event_times = [
+        0.0,
+        np.nanmedian(df["t_go"]),
+    ]
+    event_labels = ["Cue", "GO"]
+    event_colors = ["0.25", "0.25"]
+    event_opacities = [0.04, 0.04]
+    event_linestyles = ["--", ":"]
+    event_linewidths = [1.0, 1.2]
+    event_alphas = [0.7, 0.8]
     plot_population_average_tdr_input(
         df,
         rate_col="analysis_rate",
@@ -324,6 +422,16 @@ def main(
         axis_names=axis_names,
     )
 
+    event_times = [
+        0.0,
+        np.nanmedian(df["t_go"]),
+    ]
+    event_labels = ["Cue", "GO"]
+    event_colors = ["k", "k"]
+    event_opacities = [0.04, 0.04]
+    event_linestyles = ["--", ":"]
+    event_linewidths = [1.0, 1.2]
+    event_alphas = [0.7, 0.8]
     plot_tdr_trajectory_distance(
         [d_effector, d_hand, d_space],
         analysis_time,
@@ -341,9 +449,10 @@ def main(
         downsample=2,
     )
 
-    event_colors = ["rgba(80,80,80,1)"]
-    event_opacities = [0.04]
-
+    event_colors = [
+        "rgba(80,80,80,1)",
+        "rgba(80,80,80,1)",
+    ]
     plot_tdr_time_y_z_3d(
         projections,
         analysis_time,
@@ -382,7 +491,7 @@ def main(
         projections,
         analysis_time,
         axis_names,
-        y_axis="H",
+        y_axis="T",
         z_axis="E",
         y_label="Space",
         z_label="Effector",
@@ -490,14 +599,7 @@ def main(
     # 2D projections of 8 condition-averaged trajectories
     # onto each regression/TDR axis over time
     # ------------------------------------------------------------
-    event_times = [0.0]
-    event_labels = ["MOV"]
-    event_colors = ["k"]
-    event_opacities = [0.04]
-    event_linestyles = ["--"]
-    event_linewidths = [1.0]
-    event_alphas = [0.7]
-
+    event_colors = ["k", "k"]
     plot_all_tdr_axes_timecourses_separate(
         projections,
         analysis_time,
@@ -537,7 +639,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--plots_dir",
         type=Path,
-        default=Path("plots/tdr_int_mov"),
+        default=Path("plots/tdr_int_cue"),
         help="Directory where TDR output plots and CSV files are saved.",
     )
     args = parser.parse_args()

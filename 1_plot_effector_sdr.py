@@ -21,19 +21,23 @@ def main(
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_processed_trials(normalized=True)
+    df = load_processed_trials()
 
     # ------------------------------------------------------------
     # Event times
     # ------------------------------------------------------------
     cue_state = 6
+    go_state = 4
     mov_state = 68
 
     df["t_cue"] = df.apply(
         lambda row: get_state_onset(row["states_onset"], row["states"], cue_state),
         axis=1,
     )
-
+    df["t_go"] = df.apply(
+        lambda row: get_state_onset(row["states_onset"], row["states"], go_state),
+        axis=1,
+    )
     df["t_mov"] = df.apply(
         lambda row: get_state_onset(row["states_onset"], row["states"], mov_state),
         axis=1,
@@ -43,12 +47,7 @@ def main(
     # Diagnostic plots
     # ------------------------------------------------------------
     if plot:
-        plot_event_time_distributions(
-            df,
-            plots_dir=plots_dir,
-        )
-
-        plot_cue_to_movement_delay_by_effector(
+        plot_event_diagnostics(
             df,
             plots_dir=plots_dir,
         )

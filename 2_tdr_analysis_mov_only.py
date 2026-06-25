@@ -17,7 +17,7 @@ def main(
     no_interaction=False,
     use_pca_denoising=False,
     plot=False,
-    plots_dir=Path("plots/tdr_int_stitched"),
+    plots_dir=Path("plots/tdr_int_mov_only"),
 ):
     """
     Load preprocessed trials, align spikes to cue, compute SDFs, then run TDR.
@@ -25,101 +25,59 @@ def main(
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_processed_trials(normalized=True)
-
-    """ # ------------------------------------------------------------
-    # Keep only units with at least 20 trials in every condition
-    # ------------------------------------------------------------
-    min_trials_per_condition = 5
-
-    trials_per_condition = count_rows_per_unit_condition(
-        df,
-        unit_cols=("session", "unit_ID"),
-        condition_cols=("effector", "reach_hand", "target_hemifield"),
-    )
-
-    trials_per_condition.to_csv(
-        plots_dir / "rows_per_unit_per_condition_before_filter.csv",
-        index=False,
-    )
-
-    good_units = (
-        trials_per_condition.groupby(["session", "unit_ID"])["n_rows"]
-        .min()
-        .reset_index()
-    )
-
-    good_units = good_units[good_units["n_rows"] >= min_trials_per_condition][
-        ["session", "unit_ID"]
-    ]
-
-    n_units_before = df[["session", "unit_ID"]].drop_duplicates().shape[0]
-
-    df = df.merge(
-        good_units,
-        on=["session", "unit_ID"],
-        how="inner",
-    ).reset_index(drop=True)
-
-    n_units_after = df[["session", "unit_ID"]].drop_duplicates().shape[0]
-
-    print(f"Units before condition-count filtering: {n_units_before}")
-    print(
-        f"Units after requiring >= {min_trials_per_condition} trials "
-        f"in every condition: {n_units_after}"
-    )
-    print(f"Rows after unit filtering: {len(df)}")
-    exit() """
+    df = load_processed_trials(path=Path("data/old_data/processed_trials.pkl"))
 
     # ------------------------------------------------------------
-    # Get time of onset of CUE, MOV and GO
+    # Get time of onset of MOV
     # ------------------------------------------------------------
     cue_state = 6
     mov_state = 68
+    mov_end_state = 69
     go_state = 4
     df["t_cue"] = df.apply(
         lambda row: get_state_onset(row["states_onset"], row["states"], cue_state),
-        axis=1,
-    )
-
-    df["t_mov"] = df.apply(
-        lambda row: get_state_onset(row["states_onset"], row["states"], mov_state),
         axis=1,
     )
     df["t_go"] = df.apply(
         lambda r: get_state_onset(r["states_onset"], r["states"], go_state),
         axis=1,
     )
+    df["t_mov"] = df.apply(
+        lambda row: get_state_onset(row["states_onset"], row["states"], mov_state),
+        axis=1,
+    )
+    df["t_mov_end"] = df.apply(
+        lambda row: get_state_onset(row["states_onset"], row["states"], mov_end_state),
+        axis=1,
+    )
 
     # ------------------------------------------------------------
-    # Cue-aligned analysis window: -0.5 to 2.0 s after cue
+    # Aligned analysis window: -0.5 to 0.5 s after MVO
     # ------------------------------------------------------------
     bin_size = 0.001
-    cue_sdf = df.apply(
+    mov_sdf = df.apply(
         lambda row: slice_sdf_to_event(
             row,
-            event_time_col="t_cue",
+            event_time_col="t_mov",
             t_start=-0.5,
-            t_end=2.0,
+            t_end=0.5,
             bin_size=bin_size,
         ),
         axis=1,
     )
 
-    df["analysis_time"] = cue_sdf.apply(lambda x: x[0])
-    df["analysis_rate"] = cue_sdf.apply(lambda x: x[1])
+    df["analysis_time"] = mov_sdf.apply(lambda x: x[0])
+    df["analysis_rate"] = mov_sdf.apply(lambda x: x[1])
 
     # ------------------------------------------------------------
     # Align other event times to cue
     # ------------------------------------------------------------
-    df["t_mov"] = df["t_mov"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
+    df["t_mov"] = 0.0
 
-    df["t_go"] = df["t_go"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
-
-    df["t_cue"] = 0.0
+    df["t_go"] = df["t_go"].to_numpy(dtype=float) - df["t_mov"].to_numpy(dtype=float)
 
     # ------------------------------------------------------------
-    # Remove rows with NaNs in cue or movement SDFs
+    # Remove rows with NaNs in movement SDFs
     # ------------------------------------------------------------
     before = len(df)
     df = df[
@@ -140,16 +98,12 @@ def main(
     # ------------------------------------------------------------
     # Common event markers for plots
     # ------------------------------------------------------------
-    event_times = [
-        0.0,
-        np.nanmedian(df["t_go"]),
-    ]
-    event_labels = ["Cue", "GO"]
-    event_colors = ["k", "k"]
-    event_opacities = [0.04, 0.04]
-    event_linestyles = ["--", ":"]
-    event_linewidths = [1.2, 1.2]
-    event_alphas = [0.7, 0.8]
+    event_times = [0.0]
+    event_labels = ["MOV"]
+    event_colors = ["k"]
+    event_linestyles = ["--"]
+    event_linewidths = [1.2]
+    event_alphas = [0.7]
 
     # ------------------------------------------------------------
     # Plot 10 random SDFs, vertically shifted
@@ -172,23 +126,28 @@ def main(
     # Keep only units with at least one trial in every condition
     # ------------------------------------------------------------
     complete_units = (
-        trials_per_condition.groupby(["unit_ID"])["n_rows"].min().reset_index()
+        trials_per_condition.groupby(["session", "unit_ID"])["n_rows"]
+        .min()
+        .reset_index()
     )
 
-    complete_units = complete_units[complete_units["n_rows"] >= 1][["unit_ID"]]
+    complete_units = complete_units[complete_units["n_rows"] > 0][
+        ["session", "unit_ID"]
+    ]
 
     print(
-        f"Units before complete-condition filtering: {df[['unit_ID']].drop_duplicates().shape[0]}"
+        f"Units before complete-condition filtering: {df[['session', 'unit_ID']].drop_duplicates().shape[0]}"
     )
     print(f"Units after complete-condition filtering: {len(complete_units)}")
 
     df = df.merge(
         complete_units,
-        on=["unit_ID"],
+        on=["session", "unit_ID"],
         how="inner",
     )
 
     columns_to_keep = [
+        "session",
         "unit_ID",
         "trial_index",
         "pulvinar_hemifield",
@@ -198,6 +157,7 @@ def main(
         "t_cue",
         "t_mov",
         "t_go",
+        "t_mov_end",
         "analysis_rate",
         "analysis_time",
     ]
@@ -206,68 +166,21 @@ def main(
     # ------------------------------------------------------------
     # Regressors
     # ------------------------------------------------------------
+    df = add_tdr_int_regressors(df, interaction=True)
 
-    # Condition-independent regressors
-    df = add_condition_independent_regressors(
-        df,
-        time_col="analysis_time",
-        cue_time=0.0,
-        go_time=1.3,
-        mov_time_col="t_mov",
-    )
-
-    # Space Regressors
-    df = df.rename(columns={"target_hemifield": "space"})
-    df["space"] = df["space"].map({"contra": 1.0, "ipsi": -1.0})
-    df = mask_regressors(
-        df,
-        regressors=("space",),
-        ci_col="cueCI",
-    )
-
-    # Effector Regressors
-    df = add_effector_regressors(df)
-    df = mask_regressors(
-        df,
-        regressors=("saccade", "ipsi_hand", "contra_hand"),
-        ci_col="movCI",
-        suffix="_mov",
-    )
-    df = mask_regressors(
-        df,
-        regressors=("saccade", "ipsi_hand", "contra_hand"),
-        ci_col="prepCI",
-        suffix="_prep",
-    )
-
-    # Hand Regressors
-    df = df.rename(columns={"reach_hand": "hand"})
-    df["hand"] = df["hand"].map({"contra": 1.0, "ipsi": -1.0})
-    df["hand"] = [
-        float(h) * np.ones_like(np.asarray(t, dtype=float))
-        for h, t in zip(df["hand"], df["analysis_time"])
-    ]
+    df = add_condition_independent_regressors(df)
 
     drop_cols = [
-        "unit_ID",
-        "t_cue",
+        "E",
+        "T",
+        "H",
         "t_mov",
         "t_go",
         "analysis_rate",
         "analysis_time",
-        "cueCI",
-        "goCI",
-        "prepCI",
-        "movCI",
-        "saccade_mov",
-        "ipsi_hand_mov",
-        "contra_hand_mov",
-        "saccade_prep",
-        "ipsi_hand_prep",
-        "contra_hand_prep",
-        "hand",
-        "space",
     ]
+    if not no_interaction:
+        drop_cols += ["EH", "ET"]
 
     df = df.dropna(subset=drop_cols).copy()
     df = df[
@@ -278,78 +191,27 @@ def main(
     # ------------------------------------------------------------
     # Fit TDR axes
     # ------------------------------------------------------------
-    regressors = (
-        "cueCI",
-        "goCI",
-        "prepCI",
-        "movCI",
-        "saccade_mov",
-        "ipsi_hand_mov",
-        "contra_hand_mov",
-        "saccade_prep",
-        "ipsi_hand_prep",
-        "contra_hand_prep",
-        "hand",
-        "space",
-    )
+    regressors = ("E", "T", "H", "goCI")
+    interaction_regressors = ("EH", "ET")
 
     axes_raw, axes_ortho, units, task_regressors = fit_tdr_axes(
         df,
         regressors=regressors,
+        interaction_regressors=interaction_regressors,
+        no_interaction=False,
         rate_col="analysis_rate",
         time_col="analysis_time",
     )
 
     # ------------------------------------------------------------
-    # TDR beta/effect-size statistics
-    # ------------------------------------------------------------
-    beta_unit_stats, beta_summary, beta_axis_summary = summarize_tdr_beta_effect_sizes(
-        axes_raw,
-        task_regressors,
-        units=units,
-    )
-
-    beta_unit_stats.to_csv(
-        plots_dir / "tdr_beta_effect_sizes_by_unit.csv",
-        index=False,
-    )
-
-    beta_summary.to_csv(
-        plots_dir / "tdr_beta_effect_size_summary.csv",
-        index=False,
-    )
-
-    beta_axis_summary.to_csv(
-        plots_dir / "tdr_beta_axis_strength_summary.csv",
-        index=False,
-    )
-
-    print("\nTDR beta effect-size summary:")
-    print(beta_summary)
-
-    print("\nTDR raw axis strength:")
-    print(beta_axis_summary)
-    exit()
-
-    # ------------------------------------------------------------
     # Condition-averaged trajectories + projections
     # ------------------------------------------------------------
 
+    # 2 x 2 x 2 = 8 conditions:
+    # effector: reach / saccade
+    # reach_hand: ipsi / contra
+    # target_hemifield: ipsi / contra
     condition_factors = {
-        # For cueCI, prepCI, movCI:
-        # one average trajectory across all trials
-        "all_trials": (),
-        # For movement/action axes:
-        # reach vs saccade
-        "effector": ("effector",),
-        # For hand/prep hand axes:
-        # ipsi vs contra hand
-        "hand": ("reach_hand",),
-        # For space/cue space axis:
-        # ipsi vs contra target
-        "space": ("target_hemifield",),
-        # Optional: full 8-condition trajectories
-        # useful for interaction-like visual inspection
         "all_conditions": ("effector", "reach_hand", "target_hemifield"),
     }
 
@@ -390,95 +252,12 @@ def main(
     projections = projections_by["all_conditions"]
 
     # ------------------------------------------------------------
-    # Variance explained by TDR axes
-    # ------------------------------------------------------------
-    axis_names = list(task_regressors)
-
-    # ------------------------------------------------------------
-    # 1) Task + CI variance explained
-    # ------------------------------------------------------------
-    tdr_var_time_task_plus_ci = time_resolved_var_by_tdr_axes(
-        condition_pop,
-        axes_ortho,
-        axis_names,
-        analysis_time,
-        center_across_conditions=False,
-        normalize_across_axes=True,
-    )
-
-    tdr_var_time_task_plus_ci.to_csv(
-        plots_dir / "tdr_axis_variance_explained_task_plus_CI_time_resolved.csv",
-        index=False,
-    )
-
-    plot_tdr_axis_var_time_resolved(
-        tdr_var_time_task_plus_ci,
-        out_path=plots_dir / "tdr_axis_variance_explained_task_plus_CI_stacked.png",
-        title="Task + CI axis variance explained over time",
-        xlabel="Time relative to cue onset (s)",
-        ylabel="Variance explained (%)",
-        y_col="percent_normalized_variance_explained",
-        axis_order=["cueCI", "goCI", "T", "H", "E", "ET", "EH"],
-        event_times=event_times,
-        event_labels=event_labels,
-        event_linestyles=event_linestyles,
-        event_colors=event_colors,
-        event_linewidths=event_linewidths,
-        event_alphas=event_alphas,
-        downsample=2,
-    )
-
-    # ------------------------------------------------------------
-    # 2) Task-only variance explained
-    # ------------------------------------------------------------
-    task_axis_names = [axis for axis in axis_names if axis not in ("cueCI", "goCI")]
-    task_axis_idx = [axis_names.index(axis) for axis in task_axis_names]
-    axes_ortho_task_only = axes_ortho[:, task_axis_idx]
-
-    tdr_var_time_task_only = time_resolved_var_by_tdr_axes(
-        condition_pop,
-        axes_ortho_task_only,
-        task_axis_names,
-        analysis_time,
-        center_across_conditions=True,
-        normalize_across_axes=True,
-    )
-
-    tdr_var_time_task_only.to_csv(
-        plots_dir / "tdr_axis_variance_explained_task_only_time_resolved.csv",
-        index=False,
-    )
-
-    plot_tdr_axis_var_time_resolved(
-        tdr_var_time_task_only,
-        out_path=plots_dir / "tdr_axis_variance_explained_task_only_stacked.png",
-        title="Task-axis variance explained over time",
-        xlabel="Time relative to cue onset (s)",
-        ylabel="Variance explained (%)",
-        y_col="percent_normalized_variance_explained",
-        axis_order=["T", "H", "E", "ET", "EH"],
-        event_times=event_times,
-        event_labels=event_labels,
-        event_linestyles=event_linestyles,
-        event_colors=event_colors,
-        event_linewidths=event_linewidths,
-        event_alphas=event_alphas,
-        downsample=2,
-    )
-
-    # ------------------------------------------------------------
     # Simple population averages of model input
     # ------------------------------------------------------------
-    event_times = [
-        0.0,
-        np.nanmedian(df["t_go"]),
-    ]
-    event_labels = ["Cue", "GO"]
-    event_colors = ["0.25", "0.25"]
-    event_opacities = [0.04, 0.04]
-    event_linestyles = ["--", ":"]
-    event_linewidths = [1.0, 1.2]
-    event_alphas = [0.7, 0.8]
+
+    # Common event markers for plots
+    event_opacities = [0.04]
+
     plot_population_average_tdr_input(
         df,
         rate_col="analysis_rate",
@@ -490,7 +269,7 @@ def main(
         event_colors=event_colors,
         event_linewidths=event_linewidths,
         event_alphas=event_alphas,
-        xlabel="Time relative to cue onset (s)",
+        xlabel="Time relative to mov onset (s)",
     )
 
     cond_stats, overall_stats = summarize_tdr_input_data(df)
@@ -559,16 +338,6 @@ def main(
         axis_names=axis_names,
     )
 
-    event_times = [
-        0.0,
-        np.nanmedian(df["t_go"]),
-    ]
-    event_labels = ["Cue", "GO"]
-    event_colors = ["k", "k"]
-    event_opacities = [0.04, 0.04]
-    event_linestyles = ["--", ":"]
-    event_linewidths = [1.0, 1.2]
-    event_alphas = [0.7, 0.8]
     plot_tdr_trajectory_distance(
         [d_effector, d_hand, d_space],
         analysis_time,
@@ -586,10 +355,8 @@ def main(
         downsample=2,
     )
 
-    event_colors = [
-        "rgba(80,80,80,1)",
-        "rgba(80,80,80,1)",
-    ]
+    event_colors = ["rgba(80,80,80,1)"]
+
     plot_tdr_time_y_z_3d(
         projections,
         analysis_time,
@@ -628,7 +395,7 @@ def main(
         projections,
         analysis_time,
         axis_names,
-        y_axis="T",
+        y_axis="H",
         z_axis="E",
         y_label="Space",
         z_label="Effector",
@@ -736,7 +503,14 @@ def main(
     # 2D projections of 8 condition-averaged trajectories
     # onto each regression/TDR axis over time
     # ------------------------------------------------------------
-    event_colors = ["k", "k"]
+    event_times = [0.0]
+    event_labels = ["MOV"]
+    event_colors = ["k"]
+    event_opacities = [0.04]
+    event_linestyles = ["--"]
+    event_linewidths = [1.0]
+    event_alphas = [0.7]
+
     plot_all_tdr_axes_timecourses_separate(
         projections,
         analysis_time,
@@ -776,7 +550,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--plots_dir",
         type=Path,
-        default=Path("plots/tdr_int_go"),
+        default=Path("plots/tdr_int_mov_only"),
         help="Directory where TDR output plots and CSV files are saved.",
     )
     args = parser.parse_args()

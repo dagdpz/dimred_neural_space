@@ -15,7 +15,7 @@ from scripts.decoding_functions import *
 
 def main(
     plot=False,
-    plots_dir=Path("plots/tdr_int_stitched"),
+    plots_dir=Path("plots/time_resolved_decoding"),
 ):
     """
     Load preprocessed trials, align spikes to cue, compute SDFs, then run TDR.
@@ -23,25 +23,29 @@ def main(
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_processed_trials(normalized=True)
+    df = load_processed_trials(path=Path("data/old_data/processed_trials.pkl"))
 
     # ------------------------------------------------------------
-    # Align spikes to cue and movement
+    # Get time of onset of CUE, MOV and GO
     # ------------------------------------------------------------
     cue_state = 6
     mov_state = 68
+    mov_end_state = 69
     go_state = 4
     df["t_cue"] = df.apply(
         lambda row: get_state_onset(row["states_onset"], row["states"], cue_state),
         axis=1,
     )
-
+    df["t_go"] = df.apply(
+        lambda r: get_state_onset(r["states_onset"], r["states"], go_state),
+        axis=1,
+    )
     df["t_mov"] = df.apply(
         lambda row: get_state_onset(row["states_onset"], row["states"], mov_state),
         axis=1,
     )
-    df["t_go"] = df.apply(
-        lambda r: get_state_onset(r["states_onset"], r["states"], go_state),
+    df["t_mov_end"] = df.apply(
+        lambda row: get_state_onset(row["states_onset"], row["states"], mov_end_state),
         axis=1,
     )
 
@@ -62,6 +66,19 @@ def main(
 
     df["analysis_time"] = cue_sdf.apply(lambda x: x[0])
     df["analysis_rate"] = cue_sdf.apply(lambda x: x[1])
+
+    # ------------------------------------------------------------
+    # Align other event times to cue
+    # ------------------------------------------------------------
+    df["t_mov"] = df["t_mov"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
+
+    df["t_mov_end"] = df["t_mov_end"].to_numpy(dtype=float) - df["t_cue"].to_numpy(
+        dtype=float
+    )
+
+    df["t_go"] = df["t_go"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
+
+    df["t_cue"] = 0.0
 
     # ------------------------------------------------------------
     # Remove rows with NaNs in cue or movement SDFs
@@ -117,6 +134,7 @@ def main(
         "t_cue",
         "t_mov",
         "t_go",
+        "t_mov_end",
         "analysis_rate",
         "analysis_time",
     ]
@@ -249,8 +267,8 @@ def main(
             "Effector": dec_effector,
             "Space": dec_space,
             "Reach hand": dec_hand,
-            "Effector × hand": dec_effector_x_hand,
-            "Effector × space": dec_effector_x_space,
+            "Effector x hand": dec_effector_x_hand,
+            "Effector x space": dec_effector_x_space,
         },
         out_path=plots_dir / "decoding_all_accuracy.png",
         title="Time-resolved decoding: main effects and effector interactions",

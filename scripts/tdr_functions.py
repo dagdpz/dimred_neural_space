@@ -6,41 +6,52 @@ import matplotlib.pyplot as plt
 from scripts.utils import *
 
 
-def add_condition_independent_regressors(
-    df,
-    *,
-    time_col="analysis_time",
-    cue_time=0.0,
-    go_time=1.3,
-    mov_time_col=None,
-    cue_duration=0.150,
-):
+def add_tdr_int_regressors(df, interaction=False):
+    """
+    Binary coding:
+        effector: reach=+1, saccade=-1
+        target/space: ipsi=-1, contra=1
+        hand: ipsi=-1, contra=1
+
+    Interactions:
+        EH = effector x hand
+        ET = effector x target/space
+    """
+    df = df.copy()
+
+    df["E"] = df["effector"].map({"reach": 1.0, "saccade": -1.0})
+    df["T"] = df["target_hemifield"].map({"contra": 1.0, "ipsi": -1.0})
+    df["H"] = df["reach_hand"].map({"contra": 1.0, "ipsi": -1.0})
+
+    if interaction:
+        df["EH"] = df["E"] * df["H"]
+        df["ET"] = df["E"] * df["T"]
+
+    return df
+
+
+def add_condition_independent_regressors(df):
     """
     Add condition-independent, time-dependent regressors.
 
     Each new regressor is stored as a 1D array with the same length as
     `analysis_time`.
-
-    cueCI:
-        cue period only.
-
-    prepCI:
-        after cue period until movement onset.
-
-    movCI:
-        from movement onset onward.
     """
+    time_col = "analysis_time"
+
     df = df.copy()
 
     if len(df) == 0:
         raise ValueError("Cannot add CI regressors to an empty dataframe.")
 
-    if mov_time_col is None:
-        raise ValueError("mov_time_col is required to define prepCI and movCI.")
+    required_cols = [time_col, "t_cue", "t_go", "t_mov", "t_mov_end"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
 
     cueCI = []
+    planCI = []
     goCI = []
-    prepCI = []
     movCI = []
 
     for _, row in df.iterrows():
@@ -48,31 +59,120 @@ def add_condition_independent_regressors(
 
         if t.ndim != 1 or t.size == 0 or not np.all(np.isfinite(t)):
             cueCI.append(np.full(0, np.nan))
-            prepCI.append(np.full(0, np.nan))
+            planCI.append(np.full(0, np.nan))
+            goCI.append(np.full(0, np.nan))
             movCI.append(np.full(0, np.nan))
             continue
 
-        t_mov = row[mov_time_col]
+        t_mov = float(row["t_mov"])
+        t_cue = float(row["t_cue"])
+        t_go = float(row["t_go"])
+        t_mov_end = float(row["t_mov_end"])
 
         if not np.isfinite(t_mov):
             cueCI.append(np.zeros_like(t, dtype=float))
-            prepCI.append(np.zeros_like(t, dtype=float))
+            planCI.append(np.zeros_like(t, dtype=float))
+            goCI.append(np.zeros_like(t, dtype=float))
             movCI.append(np.zeros_like(t, dtype=float))
             continue
 
-        t_mov = float(t_mov)
-
-        cueCI.append(((t >= cue_time) & (t < cue_time + cue_duration)).astype(float))
-        goCI.append(((t >= go_time) & (t < t_mov)).astype(float))
-
-        prepCI.append(((t >= cue_time + cue_duration) & (t < t_mov)).astype(float))
-
-        movCI.append((t >= t_mov).astype(float))
+        cueCI.append(((t >= t_cue + 0.05) & (t < t_cue + 0.2)).astype(float))
+        planCI.append(((t >= t_cue + 0.2) & (t < t_go)).astype(float))
+        goCI.append(((t >= t_go + 0.05) & (t < t_go + 0.2)).astype(float))
+        movCI.append(((t >= t_mov) & (t < t_mov + 0.3)).astype(float))
 
     df["cueCI"] = cueCI
+    df["planCI"] = planCI
     df["goCI"] = goCI
-    df["prepCI"] = prepCI
     df["movCI"] = movCI
+
+    return df
+
+
+def add_target_xy_regressors(df):
+    """
+    Add continuous target-position regressors.
+
+    space_x:
+        horizontal target position, signed relative to pulvinar:
+            ipsi   = negative
+            contra = positive
+
+    space_y:
+        vertical target position relative to fixation position:
+            target_y - fixation_y
+    """
+    df = df.copy()
+
+    if "tar_pos" not in df.columns:
+        raise ValueError("Missing required column: tar_pos")
+
+    raw_x = df["tar_pos"].apply(lambda z: np.real(z) if pd.notna(z) else np.nan)
+    raw_y = df["tar_pos"].apply(lambda z: np.imag(z) if pd.notna(z) else np.nan)
+
+    # Change sign of x position for ipsi values (they should be negative)
+    abs_x = raw_x.abs()
+    side_sign = df["recorded_side"].map(
+        {
+            "left": 1.0,
+            "right": -1.0,
+        }
+    )
+    df["space_x"] = side_sign * raw_x
+
+    # Raw fixation coordinates
+    fix_y = df["fix_pos"].apply(lambda z: np.imag(z) if pd.notna(z) else np.nan)
+    df["space_y"] = raw_y - fix_y
+
+    df.loc[df["space_x"].abs() < 1e-3, "space_x"] = 0.0
+    df.loc[df["space_y"].abs() < 1e-3, "space_y"] = 0.0
+
+    df["space_x"] = df["space_x"].round(2)
+    df["space_y"] = df["space_y"].round(2)
+
+    return df
+
+
+def add_effector_masks(
+    df,
+    *,
+    time_col="analysis_time",
+):
+    """
+    Add masks used only for effector/action regressors.
+    """
+    df = df.copy()
+
+    required_cols = [time_col, "t_cue", "t_mov", "t_mov_end"]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    eff_plan_mask = []
+    eff_mov_mask = []
+
+    for _, row in df.iterrows():
+        t = np.asarray(row[time_col], dtype=float)
+
+        if t.ndim != 1 or t.size == 0 or not np.all(np.isfinite(t)):
+            eff_plan_mask.append(np.full(0, np.nan))
+            eff_mov_mask.append(np.full(0, np.nan))
+            continue
+
+        t_cue = float(row["t_cue"])
+        t_mov = float(row["t_mov"])
+        t_mov_end = float(row["t_mov_end"])
+
+        if not np.all(np.isfinite([t_cue, t_mov, t_mov_end])):
+            eff_plan_mask.append(np.zeros_like(t, dtype=float))
+            eff_mov_mask.append(np.zeros_like(t, dtype=float))
+            continue
+
+        eff_plan_mask.append(((t >= t_cue + 0.2) & (t < t_mov)).astype(float))
+        eff_mov_mask.append(((t >= t_mov) & (t < t_mov_end)).astype(float))
+
+    df["eff_plan_mask"] = eff_plan_mask
+    df["eff_mov_mask"] = eff_mov_mask
 
     return df
 
@@ -117,7 +217,7 @@ def mask_regressors(
     df,
     *,
     regressors,
-    ci_col,
+    mask_col,
     suffix=None,
 ):
     """
@@ -132,8 +232,8 @@ def mask_regressors(
     regressors : list or tuple
         Scalar regressor columns to mask.
 
-    ci_col : str
-        Column containing 1D CI mask arrays.
+    mask_col : str
+        Column containing 1D mask arrays.
 
     suffix : str or None
         If None, overwrite the original columns.
@@ -141,7 +241,7 @@ def mask_regressors(
     """
     df = df.copy()
 
-    required_cols = list(regressors) + [ci_col]
+    required_cols = list(regressors) + [mask_col]
     missing = [col for col in required_cols if col not in df.columns]
     if missing:
         raise ValueError(f"Missing columns for masking: {missing}")
@@ -151,7 +251,7 @@ def mask_regressors(
 
         masked = []
         for _, row in df.iterrows():
-            mask = np.asarray(row[ci_col], dtype=float)
+            mask = np.asarray(row[mask_col], dtype=float)
             value = float(row[reg])
             masked.append(value * mask)
 
@@ -198,6 +298,8 @@ def fit_tdr_axes(
     regressors=("E", "T", "H"),
     rate_col="analysis_rate",
     time_col="analysis_time",
+    interaction_regressors=("EH", "ET"),
+    no_interaction=True,
 ):
     """
     Fit one multilinear regression per unit.
@@ -220,8 +322,25 @@ def fit_tdr_axes(
     task_regressors : tuple
         Names of returned axes.
     """
-    task_regressors = tuple(regressors)
+    df = df.copy()
 
+    task_regressors = tuple(regressors)
+    if not no_interaction:
+        task_regressors = task_regressors + tuple(interaction_regressors)
+
+    missing_regressors = [reg for reg in task_regressors if reg not in df.columns]
+    if missing_regressors:
+        raise ValueError(f"Missing regressor columns: {missing_regressors}")
+
+    missing_required = [
+        col for col in list(unit_cols) + [rate_col, time_col] if col not in df.columns
+    ]
+    if missing_required:
+        raise ValueError(f"Missing required columns: {missing_required}")
+
+    # ------------------------------------------------------------
+    # Get units
+    # ------------------------------------------------------------
     units = (
         df[list(unit_cols)]
         .drop_duplicates()
@@ -233,6 +352,9 @@ def fit_tdr_axes(
     betas = []
     units_used = []
 
+    # ------------------------------------------------------------
+    # Fit one regression per unit
+    # ------------------------------------------------------------
     for unit in units:
         unit_df = df.copy()
 
@@ -240,7 +362,7 @@ def fit_tdr_axes(
             unit_df = unit_df[unit_df[col] == val]
 
         required_cols = list(task_regressors) + [rate_col, time_col]
-        unit_df = unit_df.dropna(subset=required_cols)
+        unit_df = unit_df.dropna(subset=required_cols).copy()
 
         if len(unit_df) == 0:
             continue
@@ -254,10 +376,12 @@ def fit_tdr_axes(
             continue
 
         n_trials, n_time = rates.shape
-
-        # Regression target:
-        # one row per trial-timepoint
         y = rates.reshape(-1)
+
+        # Use the first time vector only to check length.
+        time = np.asarray(unit_df[time_col].iloc[0], dtype=float)
+        if time.ndim != 1 or time.size != n_time or not np.all(np.isfinite(time)):
+            continue
 
         # ------------------------------------------------------------
         # Design matrix
@@ -270,6 +394,7 @@ def fit_tdr_axes(
             # Array-valued time-dependent regressor
             if isinstance(first_val, (np.ndarray, list, tuple)):
                 X_reg = np.stack(unit_df[reg].to_numpy()).astype(float)
+
                 if X_reg.shape != rates.shape:
                     raise ValueError(
                         f"Regressor {reg!r} has shape {X_reg.shape}, "
@@ -277,9 +402,11 @@ def fit_tdr_axes(
                         "Each time-dependent regressor must have one array per trial "
                         "with the same length as analysis_rate."
                     )
+
                 if not np.all(np.isfinite(X_reg)):
                     raise ValueError(f"Regressor {reg!r} contains non-finite values.")
                 X_cols.append(X_reg.reshape(-1))
+
             # Scalar trial-level regressor
             else:
                 values = unit_df[reg].to_numpy(dtype=float)
@@ -290,21 +417,19 @@ def fit_tdr_axes(
                 X_cols.append(np.repeat(values, n_time))
 
         X = np.column_stack(X_cols)
+
         if X.shape[0] != y.shape[0]:
             raise ValueError(
                 f"Design matrix has {X.shape[0]} rows, " f"but y has {y.shape[0]} rows."
             )
 
-        # Skip units with rank-deficient or all-zero design only if needed.
-        # Usually LinearRegression can still fit, but beta interpretation
-        # may be poor if a regressor is always zero for this unit.
         if not np.all(np.isfinite(X)):
             continue
 
         # ------------------------------------------------------------
         # Fit regression for this unit
         # ------------------------------------------------------------
-        model = LinearRegression()
+        model = LinearRegression(fit_intercept=True)
         model.fit(X, y)
 
         beta = np.asarray(model.coef_, dtype=float)
@@ -475,7 +600,6 @@ def time_resolved_var_by_tdr_axes(
     time,
     *,
     center_across_conditions=False,
-    normalize_across_axes=True,
 ):
     """
     Time-resolved variance explained by each TDR axis.
@@ -491,7 +615,10 @@ def time_resolved_var_by_tdr_axes(
     conditions = list(condition_pop.keys())
 
     for t_idx, t in enumerate(time):
-        # Xbar_t: units x conditions
+        # ------------------------------------------------------------
+        # Condition-averaged population activity at this time point
+        # Shape: units x conditions
+        # ------------------------------------------------------------
         Xbar_t = np.column_stack(
             [
                 np.asarray(condition_pop[cond], dtype=float)[:, t_idx]
@@ -515,7 +642,7 @@ def time_resolved_var_by_tdr_axes(
             continue
 
         # ------------------------------------------------------------
-        # First compute raw variance explained for all axes
+        # Raw variance explained by each axis
         # ------------------------------------------------------------
         axis_rows = []
         for axis_idx, axis_name in enumerate(axis_names):
@@ -530,27 +657,11 @@ def time_resolved_var_by_tdr_axes(
 
             variance_explained = ss_explained / ss_total
 
-            axis_rows.append(
+            rows.append(
                 {
                     "time": t,
                     "axis": axis_name,
                     "variance_explained": variance_explained,
-                    "percent_variance_explained": 100.0 * variance_explained,
                 }
             )
-
-        # ------------------------------------------------------------
-        # Normalize across axes at this time point
-        # ------------------------------------------------------------
-        var_sum = np.sum([row["variance_explained"] for row in axis_rows])
-        for row in axis_rows:
-            row["variance_explained_sum_across_axes"] = var_sum
-
-            row["normalized_variance_explained"] = row["variance_explained"] / var_sum
-
-            row["percent_normalized_variance_explained"] = (
-                100.0 * row["normalized_variance_explained"]
-            )
-
-            rows.append(row)
     return pd.DataFrame(rows)

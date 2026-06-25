@@ -78,12 +78,17 @@ def ipsi_contra(side, reference_side):
 
 
 def get_state_onset(states_onset, states, state_id):
-    """Return onset time for the first occurrence of state_id, or NaN if missing."""
     if states_onset is None or states is None:
         return np.nan
+
     s = np.asarray(states, dtype=float).ravel()
     t = np.asarray(states_onset, dtype=float).ravel()
+
     mask = s == float(state_id)
+
+    if not np.any(mask):
+        return np.nan
+
     return float(t[np.where(mask)[0][0]])
 
 

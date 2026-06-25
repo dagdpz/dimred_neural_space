@@ -507,6 +507,11 @@ def plot_tdr_timecolor_3d(
     fig.write_html(out_path)
 
 
+def target_pos_label(cond):
+    x, y = cond
+    return f"x={x:.2f}, y={y:.2f}"
+
+
 def plot_tdr_axis_timecourse(
     projections,
     analysis_time,
@@ -566,16 +571,20 @@ def plot_tdr_axis_timecourse(
 
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
 
-    for cond in conds:
+    # Color cycle for conditions that are not in CONDITION_COLORS
+    cmap = plt.get_cmap("tab20")
+    fallback_colors = [cmap(i) for i in np.linspace(0, 1, max(len(conds), 2))]
+
+    for i, cond in enumerate(conds):
         Y = np.asarray(projections[cond], dtype=float)
         y = np.asarray(Y[axis_idx, :], dtype=float)
 
         finite = np.isfinite(t) & np.isfinite(y)
 
         if isinstance(cond, tuple) and len(cond) == 3:
-            color = CONDITION_COLORS.get(cond, "0.4")
+            color = CONDITION_COLORS.get(cond, fallback_colors[i])
         else:
-            color = "0.4"
+            color = fallback_colors[i]
 
         ax.plot(
             t[finite][::downsample],
@@ -1378,9 +1387,8 @@ def plot_tdr_axis_var_time_resolved(
     out_path,
     title="Time-resolved variance explained by TDR axes",
     xlabel="Time (s)",
-    ylabel="Variance explained (%)",
-    use_percent=True,
-    y_col=None,
+    ylabel="Variance explained",
+    y_col="variance_explained",
     event_times=None,
     event_labels=None,
     event_linestyles=None,
@@ -1391,7 +1399,7 @@ def plot_tdr_axis_var_time_resolved(
     axis_order=None,
 ):
     """
-    Plot time-resolved variance explained as a 100% stacked area plot.
+    Plot time-resolved variance explained by TDR axes as line plots.
 
     Parameters
     ----------
@@ -1402,18 +1410,14 @@ def plot_tdr_axis_var_time_resolved(
             - y_col
 
     y_col : str or None
-        Column to plot. For 100% stacked area, usually use:
-            "percent_normalized_variance_explained"
+        Column to plot.
 
     axis_order : list[str] or None
-        Optional order of stacked axes, e.g.
+        Optional order of plotted axes, e.g.
             ["T", "H", "E", "ET", "EH", "cueCI", "goCI"]
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if y_col is None:
-        y_col = "percent_variance_explained" if use_percent else "variance_explained"
 
     required_cols = {"time", "axis", y_col}
     missing = required_cols - set(results.columns)
@@ -1440,38 +1444,29 @@ def plot_tdr_axis_var_time_resolved(
         remaining = [axis for axis in wide.columns if axis not in axis_order]
         wide = wide[axis_order + remaining]
 
-    # Fill missing values with zero before stacking
-    wide = wide.fillna(0.0)
-
     # Downsample after pivoting, so all axes stay aligned
     if downsample is None or downsample < 1:
         downsample = 1
 
     wide = wide.iloc[::downsample]
 
-    t = wide.index.to_numpy(dtype=float)
-    Y = wide.to_numpy(dtype=float).T
-    labels = list(wide.columns)
-
-    # For a true 100% stacked area plot, force each time point to sum to 100.
-    # This protects against tiny numerical drift.
-    col_sum = np.sum(Y, axis=0, keepdims=True)
-    valid = np.isfinite(col_sum[0]) & (col_sum[0] > 0)
-
-    t = t[valid]
-    Y = Y[:, valid]
-    col_sum = col_sum[:, valid]
-
-    Y = 100.0 * Y / col_sum
-
     fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
 
-    ax.stackplot(
-        t,
-        Y,
-        labels=labels,
-        alpha=0.9,
-    )
+    for axis in wide.columns:
+        y = wide[axis].to_numpy(dtype=float)
+        t = wide.index.to_numpy(dtype=float)
+
+        finite = np.isfinite(t) & np.isfinite(y)
+
+        if not np.any(finite):
+            continue
+
+        ax.plot(
+            t[finite],
+            y[finite],
+            lw=2.0,
+            label=axis,
+        )
 
     add_vertical_event_lines(
         ax,
@@ -1483,7 +1478,8 @@ def plot_tdr_axis_var_time_resolved(
         event_alphas=event_alphas,
     )
 
-    ax.set_ylim(0.0, 100.0)
+    ax.axhline(0.0, color="0.75", lw=0.8)
+
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -1502,3 +1498,707 @@ def plot_tdr_axis_var_time_resolved(
     plt.close(fig)
 
     return out_path
+
+
+def plot_target_position_trajectories_3d(
+    projections,
+    analysis_time,
+    axis_names,
+    *,
+    y_axis="space_x_cue",
+    z_axis="space_y_cue",
+    out_path=Path("plots/tdr/target_position_trajectories_3d.html"),
+    downsample=5,
+    event_times=None,
+    event_labels=None,
+):
+    """
+    Plot condition-averaged neural trajectories for each target position.
+
+    3D axes:
+        x = time
+        y = projection onto space-x TDR axis
+        z = projection onto space-y TDR axis
+
+    projections:
+        dict mapping (target_x, target_y) -> projected trajectory
+        where each value has shape n_axes x n_time.
+    """
+    import plotly.graph_objects as go
+    import numpy as np
+    from pathlib import Path
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    t = np.asarray(analysis_time, dtype=float)
+
+    if y_axis not in axis_names:
+        raise ValueError(f"{y_axis=} not found in axis_names={axis_names}")
+    if z_axis not in axis_names:
+        raise ValueError(f"{z_axis=} not found in axis_names={axis_names}")
+
+    y_idx = axis_names.index(y_axis)
+    z_idx = axis_names.index(z_axis)
+
+    fig = go.Figure()
+
+    for cond, Z in projections.items():
+        target_x, target_y = cond
+
+        y = np.asarray(Z[y_idx], dtype=float)
+        z = np.asarray(Z[z_idx], dtype=float)
+
+        finite = np.isfinite(t) & np.isfinite(y) & np.isfinite(z)
+
+        t_plot = t[finite][::downsample]
+        y_plot = y[finite][::downsample]
+        z_plot = z[finite][::downsample]
+
+        label = f"x={target_x:.2f}, y={target_y:.2f}"
+
+        hover_text = [
+            (
+                f"target {label}<br>"
+                f"time={t_plot[i]:.3f} s<br>"
+                f"{y_axis}={y_plot[i]:.3f}<br>"
+                f"{z_axis}={z_plot[i]:.3f}"
+            )
+            for i in range(len(t_plot))
+        ]
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=t_plot,
+                y=y_plot,
+                z=z_plot,
+                mode="lines+markers",
+                name=label,
+                line=dict(width=5),
+                marker=dict(size=2, opacity=0.7),
+                text=hover_text,
+                hoverinfo="text",
+            )
+        )
+
+        # Start marker
+        fig.add_trace(
+            go.Scatter3d(
+                x=[t_plot[0]],
+                y=[y_plot[0]],
+                z=[z_plot[0]],
+                mode="markers",
+                marker=dict(size=6, symbol="circle"),
+                name=f"{label} start",
+                showlegend=False,
+            )
+        )
+
+        # End marker
+        fig.add_trace(
+            go.Scatter3d(
+                x=[t_plot[-1]],
+                y=[y_plot[-1]],
+                z=[z_plot[-1]],
+                mode="markers",
+                marker=dict(size=6, symbol="x"),
+                name=f"{label} end",
+                showlegend=False,
+            )
+        )
+
+    # Optional event markers as transparent planes in time
+    if event_times is not None:
+        y_all = []
+        z_all = []
+
+        for Z in projections.values():
+            y_all.append(np.asarray(Z[y_idx], dtype=float))
+            z_all.append(np.asarray(Z[z_idx], dtype=float))
+
+        y_all = np.concatenate(y_all)
+        z_all = np.concatenate(z_all)
+
+        y_min, y_max = np.nanmin(y_all), np.nanmax(y_all)
+        z_min, z_max = np.nanmin(z_all), np.nanmax(z_all)
+
+        if event_labels is None:
+            event_labels = [f"event {i}" for i in range(len(event_times))]
+
+        for event_time, event_label in zip(event_times, event_labels):
+            fig.add_trace(
+                go.Surface(
+                    x=np.array(
+                        [
+                            [event_time, event_time],
+                            [event_time, event_time],
+                        ]
+                    ),
+                    y=np.array(
+                        [
+                            [y_min, y_max],
+                            [y_min, y_max],
+                        ]
+                    ),
+                    z=np.array(
+                        [
+                            [z_min, z_min],
+                            [z_max, z_max],
+                        ]
+                    ),
+                    opacity=0.12,
+                    showscale=False,
+                    name=event_label,
+                    hoverinfo="skip",
+                )
+            )
+
+    fig.update_layout(
+        title="Condition-averaged neural trajectories by target position",
+        scene=dict(
+            xaxis_title="Time (s)",
+            yaxis_title=f"TDR axis: {y_axis}",
+            zaxis_title=f"TDR axis: {z_axis}",
+            aspectmode="cube",
+        ),
+        width=1000,
+        height=750,
+    )
+
+    fig.write_html(out_path)
+
+
+def plot_target_position_axis_timecourse(
+    projections,
+    analysis_time,
+    axis_names,
+    *,
+    axis,
+    cond_order=None,
+    out_path=None,
+    downsample=5,
+    event_times=None,
+    event_labels=None,
+    event_linestyles=None,
+    event_colors=None,
+    event_linewidths=None,
+    event_alphas=None,
+    lw=2.0,
+):
+    """
+    Plot condition-averaged trajectories for target positions on one TDR axis.
+
+    This makes one 2D timecourse plot:
+
+        x = time
+        y = projection on selected TDR axis
+
+    Each line is one target position.
+
+    Expected condition format:
+        cond = (target_x, target_y)
+
+    Color encodes physical 2D target position:
+        target_x controls red/blue balance
+        target_y controls green/brightness
+    """
+    from pathlib import Path
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_hex
+
+    if axis not in axis_names:
+        raise ValueError(f"{axis=} not found in axis_names={axis_names}")
+
+    if out_path is None:
+        out_path = Path(f"plots/tdr/target_position_time_{axis}.png")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    t = np.asarray(analysis_time, dtype=float)
+    axis_idx = axis_names.index(axis)
+
+    conds = list(projections.keys()) if cond_order is None else list(cond_order)
+
+    # ------------------------------------------------------------
+    # Color each trajectory by physical target x/y
+    # ------------------------------------------------------------
+    target_color = make_target_color_fn(conds)
+
+    # ------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+
+    for cond in conds:
+        target_x, target_y = cond
+
+        Y = np.asarray(projections[cond], dtype=float)
+        y = np.asarray(Y[axis_idx, :], dtype=float)
+
+        finite = np.isfinite(t) & np.isfinite(y)
+
+        color = target_color(cond)
+        label = f"x={target_x:.2f}, y={target_y:.2f}"
+
+        ax.plot(
+            t[finite][::downsample],
+            y[finite][::downsample],
+            color=color,
+            lw=lw,
+            label=label,
+        )
+
+    add_vertical_event_lines(
+        ax,
+        event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+    )
+
+    ax.axhline(0.0, color="0.75", lw=0.8)
+
+    ax.set_title(f"Target-position trajectories on {axis}")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel(f"Projection on {axis}")
+    ax.grid(alpha=0.25)
+
+    ax.legend(
+        frameon=False,
+        fontsize=7,
+        ncol=1,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0,
+    )
+
+    fig.savefig(out_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+
+    return out_path
+
+
+from matplotlib.colors import to_hex
+
+
+def make_target_color_fn(conds, *, min_brightness=0.35, max_brightness=1.00):
+    """
+    Color target positions with:
+        x-position: blue -> red gradient
+        y-position: brightness
+
+    cond format:
+        (target_x, target_y)
+    """
+    target_xs = np.asarray([cond[0] for cond in conds], dtype=float)
+    target_ys = np.asarray([cond[1] for cond in conds], dtype=float)
+
+    x_min, x_max = np.nanmin(target_xs), np.nanmax(target_xs)
+    y_min, y_max = np.nanmin(target_ys), np.nanmax(target_ys)
+
+    def norm(v, vmin, vmax):
+        if vmax == vmin:
+            return 0.5
+        return (v - vmin) / (vmax - vmin)
+
+    def color_fn(cond):
+        target_x, target_y = cond
+
+        x01 = norm(float(target_x), x_min, x_max)
+        y01 = norm(float(target_y), y_min, y_max)
+
+        # x controls hue: blue -> red
+        base_r = x01
+        base_g = 0.0
+        base_b = 1.0 - x01
+
+        # y controls brightness
+        brightness = min_brightness + y01 * (max_brightness - min_brightness)
+
+        r = brightness * base_r
+        g = brightness * base_g
+        b = brightness * base_b
+
+        return to_hex((r, g, b))
+
+    return color_fn
+
+
+def plot_action_subspace_3d_time(
+    projections,
+    analysis_time,
+    axis_names,
+    *,
+    y_axis,
+    z_axis,
+    y_label=None,
+    z_label=None,
+    out_path,
+    title=None,
+    downsample=5,
+    event_times=None,
+    event_labels=None,
+    event_colors=None,
+    event_opacities=None,
+    x_label="Time relative to cue onset (s)",
+):
+    """
+    Plot 3 combined action trajectories in a 3D time x axis1 x axis2 plot.
+
+    x-axis:
+        time
+
+    y-axis:
+        projection onto y_axis
+
+    z-axis:
+        projection onto z_axis
+
+    Expected projection conditions:
+        ("saccade",)
+        ("ipsi_hand",)
+        ("contra_hand",)
+
+    This is useful for plots like:
+        time x saccade_space_x_mov x saccade_space_y_mov
+        time x ipsi_hand_space_x_mov x ipsi_hand_space_y_mov
+        time x contra_hand_space_x_mov x contra_hand_space_y_mov
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if y_axis not in axis_names:
+        raise ValueError(f"y_axis={y_axis!r} not found in axis_names.")
+    if z_axis not in axis_names:
+        raise ValueError(f"z_axis={z_axis!r} not found in axis_names.")
+
+    y_idx = axis_names.index(y_axis)
+    z_idx = axis_names.index(z_axis)
+
+    if y_label is None:
+        y_label = y_axis
+    if z_label is None:
+        z_label = z_axis
+
+    analysis_time = np.asarray(analysis_time, dtype=float)
+
+    action_order = ["saccade", "ipsi_hand", "contra_hand"]
+
+    action_labels = {
+        "saccade": "Saccade",
+        "ipsi_hand": "Ipsi-hand reach",
+        "contra_hand": "Contra-hand reach",
+    }
+
+    action_colors = {
+        "saccade": "#bf5f00",
+        "ipsi_hand": "#005fbf",
+        "contra_hand": "#007fff",
+    }
+
+    fig = go.Figure()
+
+    all_y = []
+    all_z = []
+
+    for action in action_order:
+        key = (action,)
+
+        if key in projections:
+            Z = projections[key]
+        elif action in projections:
+            Z = projections[action]
+        else:
+            print(f"Skipping {action}: not found in projections.")
+            continue
+
+        Z = np.asarray(Z, dtype=float)
+
+        y_proj = np.asarray(Z[y_idx], dtype=float)
+        z_proj = np.asarray(Z[z_idx], dtype=float)
+
+        finite = np.isfinite(analysis_time) & np.isfinite(y_proj) & np.isfinite(z_proj)
+
+        t = analysis_time[finite]
+        y = y_proj[finite]
+        z = z_proj[finite]
+
+        if len(t) == 0:
+            print(f"Skipping {action}: no finite points.")
+            continue
+
+        all_y.append(y)
+        all_z.append(z)
+
+        t_plot = t[::downsample]
+        y_plot = y[::downsample]
+        z_plot = z[::downsample]
+
+        label = action_labels.get(action, action)
+        color = action_colors.get(action, "gray")
+
+        hover_text = [
+            (
+                f"{label}<br>"
+                f"time={t_plot[i]:.3f} s<br>"
+                f"{y_axis}={y_plot[i]:.3f}<br>"
+                f"{z_axis}={z_plot[i]:.3f}"
+            )
+            for i in range(len(t_plot))
+        ]
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=t_plot,
+                y=y_plot,
+                z=z_plot,
+                mode="lines+markers",
+                name=label,
+                line=dict(
+                    color=color,
+                    width=5,
+                ),
+                marker=dict(
+                    size=2,
+                    color=color,
+                    opacity=0.75,
+                ),
+                text=hover_text,
+                hoverinfo="text",
+                connectgaps=True,
+            )
+        )
+
+        # Start marker
+        fig.add_trace(
+            go.Scatter3d(
+                x=[t_plot[0]],
+                y=[y_plot[0]],
+                z=[z_plot[0]],
+                mode="markers",
+                name=f"{label} start",
+                marker=dict(
+                    size=7,
+                    color=color,
+                    symbol="circle",
+                ),
+                showlegend=False,
+                text=[f"{label}<br>start<br>time={t_plot[0]:.3f} s"],
+                hoverinfo="text",
+            )
+        )
+
+        # End marker
+        fig.add_trace(
+            go.Scatter3d(
+                x=[t_plot[-1]],
+                y=[y_plot[-1]],
+                z=[z_plot[-1]],
+                mode="markers",
+                name=f"{label} end",
+                marker=dict(
+                    size=7,
+                    color=color,
+                    symbol="x",
+                ),
+                showlegend=False,
+                text=[f"{label}<br>end<br>time={t_plot[-1]:.3f} s"],
+                hoverinfo="text",
+            )
+        )
+
+    if len(all_y) == 0:
+        raise ValueError("No action trajectories were plotted.")
+
+    all_y = np.concatenate(all_y)
+    all_z = np.concatenate(all_z)
+
+    y_min, y_max = np.nanmin(all_y), np.nanmax(all_y)
+    z_min, z_max = np.nanmin(all_z), np.nanmax(all_z)
+
+    y_pad = 0.08 * (y_max - y_min)
+    z_pad = 0.08 * (z_max - z_min)
+
+    if y_pad == 0:
+        y_pad = 1.0
+    if z_pad == 0:
+        z_pad = 1.0
+
+    y_min -= y_pad
+    y_max += y_pad
+    z_min -= z_pad
+    z_max += z_pad
+
+    # ------------------------------------------------------------
+    # Add event planes, e.g. cue and GO
+    # ------------------------------------------------------------
+    def add_time_plane(
+        x_time,
+        name,
+        *,
+        color="rgba(80,80,80,1)",
+        opacity=0.04,
+    ):
+        if x_time is None or not np.isfinite(x_time):
+            return
+
+        fig.add_trace(
+            go.Surface(
+                x=np.array(
+                    [
+                        [x_time, x_time],
+                        [x_time, x_time],
+                    ]
+                ),
+                y=np.array(
+                    [
+                        [y_min, y_max],
+                        [y_min, y_max],
+                    ]
+                ),
+                z=np.array(
+                    [
+                        [z_min, z_min],
+                        [z_max, z_max],
+                    ]
+                ),
+                showscale=False,
+                opacity=opacity,
+                colorscale=[[0, color], [1, color]],
+                name=name,
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+    if event_times is not None:
+        event_times = list(event_times)
+        n_events = len(event_times)
+
+        if event_labels is None:
+            event_labels = [f"Event {i + 1}" for i in range(n_events)]
+
+        if event_colors is None:
+            event_colors = ["rgba(80,80,80,1)"] * n_events
+
+        if event_opacities is None:
+            event_opacities = [0.04] * n_events
+
+        for event_time, event_label, event_color, event_opacity in zip(
+            event_times,
+            event_labels,
+            event_colors,
+            event_opacities,
+        ):
+            add_time_plane(
+                event_time,
+                event_label,
+                color=event_color,
+                opacity=event_opacity,
+            )
+
+    if title is None:
+        title = f"Action trajectories: time × {y_axis} × {z_axis}"
+
+    fig.update_layout(
+        title=title,
+        scene=dict(
+            xaxis_title=x_label,
+            yaxis_title=f"TDR axis: {y_label}",
+            zaxis_title=f"TDR axis: {z_label}",
+            aspectmode="manual",
+            aspectratio=dict(
+                x=1.6,
+                y=1.0,
+                z=1.0,
+            ),
+        ),
+        width=1000,
+        height=750,
+    )
+
+    fig.write_html(out_path)
+
+    return out_path
+
+
+def plot_three_action_movement_subspaces_3d(
+    projections,
+    analysis_time,
+    axis_names,
+    *,
+    out_dir,
+    event_times=None,
+    event_labels=None,
+    event_colors=None,
+    event_opacities=None,
+    downsample=5,
+):
+    """
+    Make the three action-specific movement-space 3D plots:
+
+        time x saccade_space_x_mov x saccade_space_y_mov
+        time x ipsi_hand_space_x_mov x ipsi_hand_space_y_mov
+        time x contra_hand_space_x_mov x contra_hand_space_y_mov
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_specs = [
+        {
+            "name": "saccade",
+            "y_axis": "saccade_space_x_mov",
+            "z_axis": "saccade_space_y_mov",
+            "title": "Action trajectories in saccade movement-space",
+            "out_name": "time_saccade_space_x_mov_y_mov.html",
+        },
+        {
+            "name": "ipsi_hand",
+            "y_axis": "ipsi_hand_space_x_mov",
+            "z_axis": "ipsi_hand_space_y_mov",
+            "title": "Action trajectories in ipsi-hand reach movement-space",
+            "out_name": "time_ipsi_hand_space_x_mov_y_mov.html",
+        },
+        {
+            "name": "contra_hand",
+            "y_axis": "contra_hand_space_x_mov",
+            "z_axis": "contra_hand_space_y_mov",
+            "title": "Action trajectories in contra-hand reach movement-space",
+            "out_name": "time_contra_hand_space_x_mov_y_mov.html",
+        },
+    ]
+
+    out_paths = []
+
+    for spec in plot_specs:
+        y_axis = spec["y_axis"]
+        z_axis = spec["z_axis"]
+
+        if y_axis not in axis_names or z_axis not in axis_names:
+            print(f"Skipping {spec['name']}: missing {y_axis} or {z_axis}")
+            continue
+
+        out_path = plot_action_subspace_3d_time(
+            projections,
+            analysis_time,
+            axis_names,
+            y_axis=y_axis,
+            z_axis=z_axis,
+            y_label=y_axis,
+            z_label=z_axis,
+            out_path=out_dir / spec["out_name"],
+            title=spec["title"],
+            event_times=event_times,
+            event_labels=event_labels,
+            event_colors=event_colors,
+            event_opacities=event_opacities,
+            downsample=downsample,
+        )
+
+        out_paths.append(out_path)
+
+    return out_paths

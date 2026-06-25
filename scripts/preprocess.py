@@ -6,11 +6,12 @@ from scipy.io import loadmat
 
 from scripts.plotting import *
 from scripts.utils import *
+from scripts.preprocess import *
 
 PROCESSED_TRIALS_PATH = Path("data/processed_trials.pkl")
 
 
-def _extract_population_field(population, field):
+def _extract_population_field_old(population, field):
     """
     Extract one field from the MATLAB population struct.
     """
@@ -27,7 +28,7 @@ def _extract_population_field(population, field):
     return values
 
 
-def load_population_spike_data(filepath):
+def load_population_spike_data_old(filepath):
     """
     Load one MATLAB population file and return one row per unit-trial pair.
 
@@ -42,9 +43,9 @@ def load_population_spike_data(filepath):
     population = mat["population"]
 
     # Extract unit-level fields from MATLAB struct
-    unit_ids = _extract_population_field(population, "unit_ID")
-    targets = _extract_population_field(population, "target")
-    trials = _extract_population_field(population, "trial")
+    unit_ids = _extract_population_field_old(population, "unit_ID")
+    targets = _extract_population_field_old(population, "target")
+    trials = _extract_population_field_old(population, "trial")
 
     rows = []
 
@@ -70,6 +71,321 @@ def load_population_spike_data(filepath):
                 row[field] = value
             rows.append(row)
     return pd.DataFrame(rows)
+
+
+def build_processed_trials_old(
+    data_dir=Path("data/old_data"),
+    *,
+    sqrt_transform=True,
+    zscore=False,
+    min_mean_rate=1.0,
+    bin_size=0.001,
+    sigma=0.05,
+    plot=False,
+    plots_dir=Path("plots/preprocessing"),
+):
+    """
+    Load old-format population .mat files, convert them into one trial-level
+    DataFrame, process labels, filter trials, compute SDFs, and optionally
+    transform / normalize firing rates.
+
+    This keeps compatibility with the old one-file population format.
+
+    Parameters
+    ----------
+    data_dir : Path
+        Directory containing old-format *population*.mat files.
+
+    sqrt_transform : bool
+        If True, apply sqrt transform to SDF firing rates.
+
+    zscore : bool
+        If True, z-score firing rates per unit after optional sqrt transform.
+
+    min_mean_rate : float
+        Minimum mean raw firing rate in Hz required to keep a unit.
+
+    plot : bool
+        If True, save preprocessing diagnostic plots.
+
+    plots_dir : Path
+        Output directory for diagnostic plots.
+    """
+    data_dir = Path(data_dir)
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    population_files = sorted(data_dir.glob("*population*.mat"))
+    if not population_files:
+        raise FileNotFoundError(f"No *population*.mat files in {data_dir}")
+
+    # ------------------------------------------------------------
+    # Load each session separately
+    # ------------------------------------------------------------
+    sessions = []
+
+    for filepath in population_files:
+        session_df = load_population_spike_data_old(filepath)
+        session_df["session"] = filepath.stem
+        sessions.append(session_df)
+
+    df = pd.concat(sessions, ignore_index=True)
+
+    # ------------------------------------------------------------
+    # Optional trial-count plot before filtering
+    # ------------------------------------------------------------
+    if plot:
+        plot_trial_counts(
+            df,
+            unit_cols=("session", "unit_ID"),
+            plots_dir=plots_dir,
+            filename="trial_counts_old_format.png",
+        )
+
+    # ------------------------------------------------------------
+    # Process labels and keep usable trials
+    # ------------------------------------------------------------
+    df = process_labels_and_filter(df)
+
+    # ------------------------------------------------------------
+    # Compute raw SDFs
+    # ------------------------------------------------------------
+    df = add_sdfs(
+        df,
+        spike_col="arrival_times",
+        time_col="sdf_time",
+        rate_col="sdf_rate",
+        bin_size=bin_size,
+        sigma=sigma,
+    )
+
+    # ------------------------------------------------------------
+    # Optional random SDF plot before rate filtering / normalization
+    # ------------------------------------------------------------
+    if plot:
+        plot_random_sdfs(
+            df,
+            time_col="sdf_time",
+            rate_col="sdf_rate",
+            plots_dir=plots_dir,
+            filename="random_10_sdfs_old_format.png",
+        )
+
+    # ------------------------------------------------------------
+    # Remove invalid SDF rows
+    # ------------------------------------------------------------
+    before = len(df)
+
+    df = remove_invalid_rate_rows(
+        df,
+        rate_col="sdf_rate",
+        time_col="sdf_time",
+    )
+
+    print(f"Removed {before - len(df)} rows with invalid SDFs.")
+    print(f"Rows after SDF filtering: {len(df)}")
+
+    # ------------------------------------------------------------
+    # Remove low-firing units based on raw rates
+    # Important: do this before sqrt/z-score.
+    # ------------------------------------------------------------
+    df, unit_stats = remove_low_firing_units(
+        df,
+        unit_cols=("session", "unit_ID"),
+        rate_col="sdf_rate",
+        threshold=min_mean_rate,
+    )
+
+    unit_stats.to_csv(
+        plots_dir / "unit_mean_firing_rates_old_format.csv",
+        index=False,
+    )
+
+    # ------------------------------------------------------------
+    # Optional rate transform / normalization
+    # ------------------------------------------------------------
+    if sqrt_transform:
+        df = sqrt_transform_rates(
+            df,
+            rate_col="sdf_rate",
+        )
+
+    if zscore:
+        df = zscore_rates(
+            df,
+            unit_cols=("session", "unit_ID"),
+            rate_col="sdf_rate",
+        )
+
+    return df
+
+
+def session_key_from_path(path):
+    """
+    Extract subject + date from names like:
+        population_Linus_20160513.mat
+        trials_Linus_20160513.mat
+        trials_Flaffus_20160608.mat
+
+    Returns:
+        Linus_20160513
+        Flaffus_20160608
+    """
+    stem = Path(path).stem
+    parts = stem.split("_")
+
+    if len(parts) < 3:
+        raise ValueError(
+            f"Expected filename like population_NAME_DATE.mat or trials_NAME_DATE.mat, "
+            f"got {Path(path).name}"
+        )
+
+    return "_".join(parts[1:])
+
+
+def load_population_file(filepath):
+    filepath = Path(filepath)
+    mat = loadmat(filepath, squeeze_me=True, struct_as_record=False)
+    population = np.asarray(mat["population"]).ravel()
+
+    rows = []
+
+    for unit in population:
+        unit_id = clean_mat_value(unit.unit_ID)
+        target = clean_mat_value(unit.target)
+
+        recorded_side = pulvinar_to_side(target)
+        pulvinar_hemifield = "left" if recorded_side == "right" else "right"
+
+        unit_trials = np.asarray(unit.trial, dtype=object).ravel()
+        n_trials = len(unit_trials)
+
+        accepted = np.asarray(clean_mat_value(unit.accepted), dtype=float).ravel()
+        block = np.asarray(clean_mat_value(unit.block), dtype=float).ravel()
+        run = np.asarray(clean_mat_value(unit.run), dtype=float).ravel()
+        n = np.asarray(clean_mat_value(unit.n), dtype=float).ravel()
+
+        for trial_idx, trial in enumerate(unit_trials):
+            accepted_trial = int(accepted[trial_idx])
+
+            arrival_times = clean_mat_value(trial).arrival_times
+            arrival_times = clean_mat_value(arrival_times)
+
+            # Make spike times a clean 1D float array
+            if isinstance(arrival_times, np.ndarray):
+                arrival_times = np.asarray(arrival_times, dtype=float).ravel()
+            elif pd.isna(arrival_times):
+                arrival_times = np.array([], dtype=float)
+            else:
+                arrival_times = np.asarray([arrival_times], dtype=float)
+
+            rows.append(
+                {
+                    "unit_ID": unit_id,
+                    "recorded_side": recorded_side,
+                    "pulvinar_hemifield": pulvinar_hemifield,
+                    "trial_index": trial_idx,
+                    "block": int(block[trial_idx]),
+                    "run": int(run[trial_idx]),
+                    "n": int(n[trial_idx]),
+                    "accepted": int(accepted[trial_idx]),
+                    "arrival_times": arrival_times,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def load_trials_file(filepath):
+    """
+    Load one trials_*.mat file.
+
+    Output:
+        one row per behavioral trial.
+
+    Important:
+        block, run, n are the merge keys used to match population unit-trials.
+    """
+    filepath = Path(filepath)
+    mat = loadmat(
+        filepath,
+        squeeze_me=True,
+        struct_as_record=False,
+    )
+    trials = np.asarray(mat["trials"]).ravel()
+
+    rows = []
+    for trial_file_index, trial in enumerate(trials):
+        row = {
+            "trial_file_index": trial_file_index,
+        }
+        for field in trial._fieldnames:
+            value = clean_mat_value(getattr(trial, field))
+            row[field] = value
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    for col in ["block", "run", "n"]:
+        df[col] = df[col].astype(int)
+    return df
+
+
+def has_nonempty_arrival_times(x):
+    try:
+        arr = np.asarray(x, dtype=float).ravel()
+    except Exception:
+        return False
+
+    return arr.size > 0 and np.any(np.isfinite(arr))
+
+
+def load_session(population_file, trial_file):
+    """
+    Load one matched population/trials session and merge them.
+    """
+    population_file = Path(population_file)
+    trial_file = Path(trial_file)
+    session = session_key_from_path(population_file)
+
+    pop_df = load_population_file(population_file)
+    trial_df = load_trials_file(trial_file)
+
+    df = pop_df.merge(
+        trial_df,
+        on=["block", "run", "n"],
+        how="left",
+        validate="many_to_one",
+        suffixes=("", "_trial"),
+    )
+    df["session"] = session
+
+    # Filter accepted unit-trials
+    df = df[df["accepted"] == 1].reset_index(drop=True)
+
+    df = df[df["arrival_times"].apply(has_nonempty_arrival_times)].reset_index(
+        drop=True
+    )
+
+    columns_to_keep = [
+        "session",
+        "unit_ID",
+        "trial_index",
+        "recorded_side",
+        "pulvinar_hemifield",
+        "arrival_times",
+        "type",
+        "choice",
+        "success",
+        "effector",
+        "reach_hand",
+        "tar_pos",
+        "fix_pos",
+        "trial_onset_time",
+        "run_onset_time",
+        "states_onset",
+        "states",
+    ]
+    return df[columns_to_keep].copy()
 
 
 def process_labels_and_filter(df):
@@ -107,6 +423,7 @@ def process_labels_and_filter(df):
     df["target_hemifield"] = [
         ipsi_contra(side, ref) for side, ref in zip(target_side, df["recorded_side"])
     ]
+
     # Remove trials without spike times
     df = df.dropna(subset=["arrival_times"])
 
@@ -117,7 +434,10 @@ def process_labels_and_filter(df):
         "pulvinar_hemifield",
         "reach_hand",
         "effector",
+        "tar_pos",
+        "fix_pos",
         "target_hemifield",
+        "recorded_side",
         "trial_onset_time",
         "run_onset_time",
         "states_onset",
@@ -125,289 +445,6 @@ def process_labels_and_filter(df):
         "arrival_times",
     ]
     return df[columns].reset_index(drop=True)
-
-
-def build_processed_trials(
-    data_dir=Path("data"),
-    *,
-    normalize=True,
-    plot=False,
-):
-    """
-    Load all population .mat files, convert them into one trial-level DataFrame,
-    process labels, filter trials, and optionally normalize firing rates.
-    """
-    population_files = sorted(data_dir.glob("*population*.mat"))
-    if not population_files:
-        raise FileNotFoundError(f"No *population*.mat files in {data_dir}")
-
-    # Load each session separately
-    sessions = []
-    for filepath in population_files:
-        session_df = load_population_spike_data(filepath)
-        session_df["session"] = filepath.stem
-        sessions.append(session_df)
-
-    # Combine all sessions into one DataFrame
-    df = pd.concat(sessions, ignore_index=True)
-
-    # ------------------------------------------------------------
-    # Plot trial_index counts
-    # ------------------------------------------------------------
-    trial_counts = df.groupby(by="unit_ID").count()["trial_index"]
-    avg_trials_per_unit = trial_counts.mean()
-    std_trials_per_unit = trial_counts.std()
-    median_trials_per_unit = trial_counts.median()
-
-    # print(f"Average number of trials per unit: {avg_trials_per_unit:.2f}")
-    # print(f"STD number of trials per unit: {std_trials_per_unit:.2f}")
-    # print(f"Median number of trials per unit: {median_trials_per_unit:.2f}")
-
-    if plot:
-        plots_dir = Path("plots/preprocessing")
-        plots_dir.mkdir(parents=True, exist_ok=True)
-        fig, ax = plt.subplots(figsize=(16, 4))
-        ax.bar(trial_counts.index, trial_counts.values)
-        ax.set_xticks(np.arange(len(trial_counts.index)))
-        ax.set_xticklabels(
-            trial_counts.index,
-            rotation=90,
-            fontsize=6,
-        )
-        ax.set_xlabel("Unit")
-        ax.set_ylabel("Trial counts")
-        ax.set_title("Number of trials per unit")
-        ax.grid(axis="y", alpha=0.3)
-        fig.tight_layout()
-        fig.savefig(plots_dir / "trial_counts.png", dpi=300, bbox_inches="tight")
-        plt.close(fig)
-
-    # --- Process labels and filter ---
-    df = process_labels_and_filter(df)
-
-    df = add_sdfs(
-        df,
-        spike_col="arrival_times",
-        time_col="sdf_time",
-        rate_col="sdf_rate",
-        bin_size=0.001,
-        sigma=0.05,
-    )
-
-    # ------------------------------------------------------------
-    # Plot 10 random SDFs
-    # ------------------------------------------------------------
-    if plot:
-        rng = np.random.default_rng(0)
-        valid_sdf = df[
-            df["sdf_time"].apply(lambda x: isinstance(x, np.ndarray) and len(x) > 0)
-            & df["sdf_rate"].apply(lambda x: isinstance(x, np.ndarray) and len(x) > 0)
-        ].copy()
-        n_plot = min(10, len(valid_sdf))
-        sample_idx = rng.choice(valid_sdf.index, size=n_plot, replace=False)
-        plots_dir = Path("plots/preprocessing")
-        plots_dir.mkdir(parents=True, exist_ok=True)
-        fig, ax = plt.subplots(figsize=(10, 5))
-        for idx in sample_idx:
-            row = valid_sdf.loc[idx]
-            t = np.asarray(row["sdf_time"], dtype=float)
-            r = np.asarray(row["sdf_rate"], dtype=float)
-            ax.plot(
-                t,
-                r,
-                lw=1.2,
-                alpha=0.8,
-                label=f"unit {row['unit_ID']}, trial {row['trial_index']}",
-            )
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Firing rate (Hz)")
-        ax.set_title("Random example SDFs")
-        ax.grid(alpha=0.3)
-        ax.legend(fontsize=6, frameon=False, ncol=2)
-        fig.tight_layout()
-        fig.savefig(plots_dir / "random_10_sdfs.png", dpi=300, bbox_inches="tight")
-        plt.close(fig)
-
-    # Remove rows with invalid/NaN/empty rates
-    df = remove_invalid_rate_rows(
-        df,
-        rate_col="sdf_rate",
-        time_col="sdf_time",
-    )
-
-    # Remove low-firing units based on raw rates
-    df, unit_stats = remove_low_firing_units(
-        df,
-        unit_cols=("session", "unit_ID"),
-        rate_col="sdf_rate",
-        threshold=1.0,
-    )
-
-    # Optional per-unit rate normalization
-    if normalize:
-        df = normalize_rates(
-            df,
-            unit_cols=("session", "unit_ID"),
-            sqrt_transform=True,
-        )
-
-    return df
-
-
-def new_build_processed_trials(
-    data_dir=Path("data"),
-    *,
-    normalize=True,
-    plot=False,
-):
-    """
-    Load all population .mat files, convert them into one trial-level DataFrame,
-    process labels, filter trials, and optionally normalize firing rates.
-    """
-    population_files = sorted(data_dir.glob("*population*.mat"))
-    if not population_files:
-        raise FileNotFoundError(f"No *population*.mat files in {data_dir}")
-
-    # Load each session separately
-    sessions = []
-    for filepath in population_files:
-        session_df = load_population_spike_data(filepath)
-        session_df["session"] = filepath.stem
-        sessions.append(session_df)
-
-    # Combine all sessions into one DataFrame
-    df = pd.concat(sessions, ignore_index=True)
-
-    # ------------------------------------------------------------
-    # Plot trial_index counts
-    # ------------------------------------------------------------
-    trial_counts = df.groupby(by="unit_ID").count()["trial_index"]
-    avg_trials_per_unit = trial_counts.mean()
-    std_trials_per_unit = trial_counts.std()
-    median_trials_per_unit = trial_counts.median()
-
-    # print(f"Average number of trials per unit: {avg_trials_per_unit:.2f}")
-    # print(f"STD number of trials per unit: {std_trials_per_unit:.2f}")
-    # print(f"Median number of trials per unit: {median_trials_per_unit:.2f}")
-
-    if plot:
-        plots_dir = Path("plots/preprocessing")
-        plots_dir.mkdir(parents=True, exist_ok=True)
-        fig, ax = plt.subplots(figsize=(16, 4))
-        ax.bar(trial_counts.index, trial_counts.values)
-        ax.set_xticks(np.arange(len(trial_counts.index)))
-        ax.set_xticklabels(
-            trial_counts.index,
-            rotation=90,
-            fontsize=6,
-        )
-        ax.set_xlabel("Unit")
-        ax.set_ylabel("Trial counts")
-        ax.set_title("Number of trials per unit")
-        ax.grid(axis="y", alpha=0.3)
-        fig.tight_layout()
-        fig.savefig(plots_dir / "trial_counts.png", dpi=300, bbox_inches="tight")
-        plt.close(fig)
-
-    # --- Process labels and filter ---
-    df = process_labels_and_filter(df)
-
-    df = add_sdfs(
-        df,
-        spike_col="arrival_times",
-        time_col="sdf_time",
-        rate_col="sdf_rate",
-        bin_size=0.001,
-        sigma=0.05,
-    )
-
-    # ------------------------------------------------------------
-    # Plot 10 random SDFs
-    # ------------------------------------------------------------
-    if plot:
-        rng = np.random.default_rng(0)
-        valid_sdf = df[
-            df["sdf_time"].apply(lambda x: isinstance(x, np.ndarray) and len(x) > 0)
-            & df["sdf_rate"].apply(lambda x: isinstance(x, np.ndarray) and len(x) > 0)
-        ].copy()
-        n_plot = min(10, len(valid_sdf))
-        sample_idx = rng.choice(valid_sdf.index, size=n_plot, replace=False)
-        plots_dir = Path("plots/preprocessing")
-        plots_dir.mkdir(parents=True, exist_ok=True)
-        fig, ax = plt.subplots(figsize=(10, 5))
-        for idx in sample_idx:
-            row = valid_sdf.loc[idx]
-            t = np.asarray(row["sdf_time"], dtype=float)
-            r = np.asarray(row["sdf_rate"], dtype=float)
-            ax.plot(
-                t,
-                r,
-                lw=1.2,
-                alpha=0.8,
-                label=f"unit {row['unit_ID']}, trial {row['trial_index']}",
-            )
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Firing rate (Hz)")
-        ax.set_title("Random example SDFs")
-        ax.grid(alpha=0.3)
-        ax.legend(fontsize=6, frameon=False, ncol=2)
-        fig.tight_layout()
-        fig.savefig(plots_dir / "random_10_sdfs.png", dpi=300, bbox_inches="tight")
-        plt.close(fig)
-
-    # Remove rows with invalid/NaN/empty rates
-    df = remove_invalid_rate_rows(
-        df,
-        rate_col="sdf_rate",
-        time_col="sdf_time",
-    )
-
-    # Remove low-firing units based on raw rates
-    df, unit_stats = remove_low_firing_units(
-        df,
-        unit_cols=("session", "unit_ID"),
-        rate_col="sdf_rate",
-        threshold=1.0,
-    )
-
-    # Optional per-unit rate normalization
-    if normalize:
-        df = normalize_rates(
-            df,
-            unit_cols=("session", "unit_ID"),
-            sqrt_transform=True,
-        )
-
-    return df
-
-
-def remove_low_firing_units(
-    df,
-    *,
-    unit_cols=("session", "unit_ID"),
-    rate_col="sdf_rate",
-    threshold=2.0,
-):
-    """
-    Remove units whose mean raw firing rate is below threshold.
-
-    Assumes rate_col contains raw firing-rate arrays in Hz.
-    """
-    unit_stats = (
-        df.groupby(list(unit_cols))[rate_col]
-        .apply(mean_rate_from_series)
-        .rename("mean_rate")
-        .reset_index()
-    )
-
-    good_units = unit_stats.loc[
-        unit_stats["mean_rate"] >= threshold,
-        list(unit_cols),
-    ]
-
-    df = df.merge(good_units, on=list(unit_cols), how="inner")
-
-    return df, unit_stats
 
 
 def remove_invalid_rate_rows(
@@ -434,7 +471,7 @@ def remove_low_firing_units(
     *,
     unit_cols=("session", "unit_ID"),
     rate_col="sdf_rate",
-    threshold=2.0,
+    threshold=1.0,
 ):
     """
     Remove units whose mean raw firing rate is below threshold.
@@ -456,24 +493,6 @@ def remove_low_firing_units(
     df = df.merge(good_units, on=list(unit_cols), how="inner")
 
     return df.reset_index(drop=True), unit_stats
-
-
-def normalize_trial(rate, *, mu, sd, sqrt_transform=True):
-    """Normalize one trial SDF."""
-    rate = np.asarray(rate, dtype=float)
-
-    if sqrt_transform:
-        rate = np.sqrt(np.clip(rate, 0.0, None))
-
-    return (rate - mu) / sd
-
-
-def is_nonempty_array(x):
-    """Return True if x is an array-like object with at least one value."""
-    try:
-        return len(x) > 0
-    except TypeError:
-        return False
 
 
 def add_sdfs(
@@ -507,155 +526,316 @@ def add_sdfs(
     return df
 
 
-def normalize_rates(
+def sqrt_transform_trial(rate):
+    """
+    Apply square-root transform to one firing-rate array.
+    """
+    rate = np.asarray(rate, dtype=float)
+    return np.sqrt(np.clip(rate, 0.0, None))
+
+
+def sqrt_transform_rates(
+    df,
+    *,
+    rate_col="sdf_rate",
+):
+    """
+    Apply sqrt transform to firing-rate arrays.
+    """
+    df = df.copy()
+    df[rate_col] = df[rate_col].apply(sqrt_transform_trial)
+    return df
+
+
+def zscore_rates(
     df,
     *,
     unit_cols=("session", "unit_ID"),
-    sqrt_transform=True,
-    plot=False,
-    plots_dir=Path("plots/preprocessing"),
+    rate_col="sdf_rate",
 ):
     """
-    Compute SDFs for each trial, then normalize firing rates per unit.
+    Z-score firing-rate arrays per unit.
 
-    Filtering:
-        removes units with mean raw firing rate < min_mean_rate Hz
-
-    Steps per unit:
-    1. Convert spike times to SDFs.
-    2. Concatenate all trial SDFs for that unit.
-    3. Apply sqrt transform.
-    4. Z-score using that unit's mean and std.
-
-    If plot=True, saves firing-rate distributions before and after normalization.
+    This uses all trials and all time bins for each unit:
+        z = (rate - unit_mean) / unit_sd
     """
     df = df.copy()
 
     good_indices = []
-    raw_rates_for_plot = []
-    sqrt_rates_for_plot = []
-    norm_raw_rates_for_plot = []
-    norm_sqrt_rates_for_plot = []
 
-    # Process one unit at a time
     for _, unit_df in df.groupby(list(unit_cols), sort=True):
         idx = unit_df.index
 
-        # ------------------------------------------------------------
-        # Pool raw rates for this unit
-        # ------------------------------------------------------------
-        sdf_rate = unit_df["sdf_rate"]
-        raw_rates = np.concatenate(sdf_rate.to_numpy()).astype(float)
-        sqrt_rates = np.sqrt(np.clip(raw_rates, 0.0, None))
+        rates = np.concatenate(unit_df[rate_col].to_numpy()).astype(float)
 
-        # ------------------------------------------------------------
-        # Compute normalization statistics
-        # ------------------------------------------------------------
-        raw_mu = np.nanmean(raw_rates)
-        raw_sd = np.nanstd(raw_rates, ddof=1)
+        mu = np.nanmean(rates)
+        sd = np.nanstd(rates, ddof=1)
 
-        sqrt_mu = np.nanmean(sqrt_rates)
-        sqrt_sd = np.nanstd(sqrt_rates, ddof=1)
-
-        # Remove units with invalid variance
-        if (
-            not np.isfinite(raw_sd)
-            or raw_sd < 1e-8
-            or not np.isfinite(sqrt_sd)
-            or sqrt_sd < 1e-8
-        ):
+        if not np.isfinite(sd) or sd < 1e-8:
             continue
 
-        # ------------------------------------------------------------
-        # Normalize rates
-        # ------------------------------------------------------------
-
-        # For plotting only: z-score without sqrt
-        normalized_raw_rates = sdf_rate.apply(
-            normalize_trial,
-            mu=raw_mu,
-            sd=raw_sd,
-            sqrt_transform=False,
+        df.loc[idx, rate_col] = unit_df[rate_col].apply(
+            lambda r: (np.asarray(r, dtype=float) - mu) / sd
         )
 
-        # Actual saved rate: sqrt + z-score
-        normalized_sqrt_rates = sdf_rate.apply(
-            normalize_trial,
-            mu=sqrt_mu,
-            sd=sqrt_sd,
-            sqrt_transform=True,
-        )
-        df.loc[idx, "sdf_rate"] = normalized_sqrt_rates
-
-        # Keep only rows from valid units/trials
         good_indices.extend(idx)
 
-        if plot:
-            raw_rates_for_plot.append(raw_rates)
-            sqrt_rates_for_plot.append(sqrt_rates)
-            norm_raw_rates_for_plot.append(
-                np.concatenate(normalized_raw_rates.to_numpy()).astype(float)
-            )
-            norm_sqrt_rates_for_plot.append(
-                np.concatenate(normalized_sqrt_rates.to_numpy()).astype(float)
-            )
+    return df.loc[good_indices].reset_index(drop=True)
 
-    # Remove rows with empty SDFs, invalid units, and low-firing units
-    df = df.loc[good_indices].reset_index(drop=True)
-    if plot:
-        plot_rate_distributions_before_after(
-            raw_rates_for_plot,
-            sqrt_rates_for_plot,
-            norm_raw_rates_for_plot,
-            norm_sqrt_rates_for_plot,
+
+def build_processed_trials(
+    data_dir=Path("data/new_data"),
+    old_data_dir=Path("data/old_data"),
+    *,
+    use_old_data=False,
+    sqrt_transform=True,
+    zscore=False,
+    min_mean_rate=1.0,
+    bin_size=0.001,
+    sigma=0.05,
+    plot=False,
+    plots_dir=Path("plots/preprocessing"),
+):
+    """
+    Build processed trial DataFrame.
+
+    Default:
+        Use the new two-file data format:
+            population_*.mat
+            trials_*.mat
+
+    If use_old_data=True:
+        Use the old one-file population format in old_data_dir.
+
+    Processing steps:
+        1. Load session data.
+        2. Process behavioral labels and keep valid trials.
+        3. Compute raw SDFs.
+        4. Remove invalid SDF rows.
+        5. Remove low-firing units based on raw firing rates.
+        6. Optionally apply sqrt transform.
+        7. Optionally apply per-unit z-scoring.
+    """
+    data_dir = Path(data_dir)
+    old_data_dir = Path(old_data_dir)
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------
+    # Old-format data path
+    # ------------------------------------------------------------
+    if use_old_data:
+        return build_processed_trials_old(
+            data_dir=old_data_dir,
+            sqrt_transform=sqrt_transform,
+            zscore=zscore,
+            min_mean_rate=min_mean_rate,
+            bin_size=bin_size,
+            sigma=sigma,
+            plot=plot,
             plots_dir=plots_dir,
         )
+
+    # ------------------------------------------------------------
+    # New-format data path
+    # ------------------------------------------------------------
+    population_files = sorted(data_dir.glob("*population*.mat"))
+    trial_files = sorted(data_dir.glob("*trials*.mat"))
+
+    if not population_files:
+        raise FileNotFoundError(f"No *population*.mat files in {data_dir}")
+
+    if not trial_files:
+        raise FileNotFoundError(f"No *trials*.mat files in {data_dir}")
+
+    pop_by_session = {session_key_from_path(f): f for f in population_files}
+    trial_by_session = {session_key_from_path(f): f for f in trial_files}
+
+    common_sessions = sorted(set(pop_by_session) & set(trial_by_session))
+
+    missing_trials = sorted(set(pop_by_session) - set(trial_by_session))
+    missing_population = sorted(set(trial_by_session) - set(pop_by_session))
+
+    if missing_trials:
+        print(f"Population files without trial files: {missing_trials}")
+
+    if missing_population:
+        print(f"Trial files without population files: {missing_population}")
+
+    if not common_sessions:
+        raise FileNotFoundError(
+            f"No matched population/trials sessions found in {data_dir}."
+        )
+
+    # ------------------------------------------------------------
+    # Load matched sessions
+    # ------------------------------------------------------------
+    sessions = []
+
+    for session in common_sessions:
+        print(f"Loading {session}")
+
+        session_df = load_session(
+            pop_by_session[session],
+            trial_by_session[session],
+        )
+
+        sessions.append(session_df)
+
+    df = pd.concat(sessions, ignore_index=True)
+
+    print("\nLoaded raw new-format data:")
+    print(f"  Rows: {len(df)}")
+    print(f"  Units: {df[['session', 'unit_ID']].drop_duplicates().shape[0]}")
+    print(f"  Sessions: {df['session'].nunique()}")
+
+    # ------------------------------------------------------------
+    # Optional trial-count diagnostic before filtering
+    # ------------------------------------------------------------
+    if plot:
+        plot_trial_counts(
+            df,
+            unit_cols=("session", "unit_ID"),
+            plots_dir=plots_dir,
+            filename="trial_counts.png",
+        )
+
+    # ------------------------------------------------------------
+    # Process labels and filter behavioral trials
+    # ------------------------------------------------------------
+    before = len(df)
+
+    df = process_labels_and_filter(df)
+
+    print("\nAfter label/trial filtering:")
+    print(f"  Removed rows: {before - len(df)}")
+    print(f"  Remaining rows: {len(df)}")
+    print(f"  Units: {df['unit_ID'].drop_duplicates().shape[0]}")
+
+    # ------------------------------------------------------------
+    # Compute raw SDFs
+    # ------------------------------------------------------------
+    df = add_sdfs(
+        df,
+        spike_col="arrival_times",
+        time_col="sdf_time",
+        rate_col="sdf_rate",
+        bin_size=bin_size,
+        sigma=sigma,
+    )
+
+    # ------------------------------------------------------------
+    # Optional raw SDF diagnostic plot
+    # ------------------------------------------------------------
+    if plot:
+        plot_random_sdfs(
+            df,
+            time_col="sdf_time",
+            rate_col="sdf_rate",
+            plots_dir=plots_dir,
+            filename="random_10_sdfs.png",
+        )
+
+    # ------------------------------------------------------------
+    # Remove invalid SDF rows
+    # ------------------------------------------------------------
+    before = len(df)
+
+    df = remove_invalid_rate_rows(
+        df,
+        rate_col="sdf_rate",
+        time_col="sdf_time",
+    )
+
+    print("\nAfter invalid-SDF filtering:")
+    print(f"  Removed rows: {before - len(df)}")
+    print(f"  Remaining rows: {len(df)}")
+    print(f"  Units: {df['unit_ID'].drop_duplicates().shape[0]}")
+
+    # ------------------------------------------------------------
+    # Remove low-firing units using raw rates
+    # ------------------------------------------------------------
+    before_units = df["unit_ID"].drop_duplicates().shape[0]
+
+    df, unit_stats = remove_low_firing_units(
+        df,
+        unit_cols=("session", "unit_ID"),
+        rate_col="sdf_rate",
+        threshold=min_mean_rate,
+    )
+
+    after_units = df["unit_ID"].drop_duplicates().shape[0]
+
+    print("\nAfter low-firing unit filtering:")
+    print(f"  Minimum mean rate: {min_mean_rate} Hz")
+    print(f"  Removed units: {before_units - after_units}")
+    print(f"  Remaining units: {after_units}")
+    print(f"  Remaining rows: {len(df)}")
+
+    unit_stats.to_csv(
+        plots_dir / "unit_mean_firing_rates_new_format.csv",
+        index=False,
+    )
+
+    # ------------------------------------------------------------
+    # Optional sqrt transform
+    # ------------------------------------------------------------
+    if sqrt_transform:
+        df = sqrt_transform_rates(
+            df,
+            rate_col="sdf_rate",
+        )
+
+    # ------------------------------------------------------------
+    # Optional per-unit z-scoring
+    # ------------------------------------------------------------
+    if zscore:
+        df = zscore_rates(
+            df,
+            unit_cols=("unit_ID",),
+            rate_col="sdf_rate",
+        )
+
+    print("\nFinal processed data:")
+    print(f"  Rows: {len(df)}")
+    print(f"  Units: {df['unit_ID'].drop_duplicates().shape[0]}")
+    print(f"  sqrt_transform: {sqrt_transform}")
+    print(f"  zscore: {zscore}")
+    print(df.columns)
+
     return df
 
 
 def save_processed_trials(
     df,
     *,
-    normalize=False,
     path=PROCESSED_TRIALS_PATH,
 ):
     """
     Save processed trials to disk.
 
-    If normalize=True, the file name gets '_normalized' before the extension.
     Example:
         processed_trials.pkl
         processed_trials_normalized.pkl
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if normalize:
-        save_path = path.with_name(f"{path.stem}_normalized{path.suffix}")
-    else:
-        save_path = path
-    df.to_pickle(save_path, compression="gzip")
-    print(f"Wrote {len(df)} rows to {save_path}")
-    return save_path
+    df.to_pickle(path, compression="gzip")
+    print(f"Wrote {len(df)} rows to {path}")
+    return path
 
 
 def load_processed_trials(
     *,
-    normalized=False,
     path=PROCESSED_TRIALS_PATH,
 ):
     """
     Load processed trials from disk.
 
-    If normalized=True, loads:
-        processed_trials_normalized.pkl
-
-    Otherwise loads:
+    Loads:
         processed_trials.pkl
     """
     path = Path(path)
-
-    if normalized:
-        path = path.with_name(f"{path.stem}_normalized{path.suffix}")
 
     if not path.exists():
         raise FileNotFoundError(f"Missing {path}. Run `python 0_preprocess.py` first.")

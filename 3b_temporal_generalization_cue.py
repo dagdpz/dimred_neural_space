@@ -15,7 +15,7 @@ from scripts.decoding_functions import *
 
 def main(
     plot=False,
-    plots_dir=Path("plots/tdr_int_go"),
+    plots_dir=Path("plots/tgm_cue_aligned"),
 ):
     """
     Load preprocessed trials, align spikes to cue, compute SDFs, then run TDR.

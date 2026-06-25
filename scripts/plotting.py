@@ -31,6 +31,217 @@ CONDITION_COLORS = {
 }
 
 
+def plot_trial_counts(
+    df,
+    *,
+    unit_cols=("session", "unit_ID"),
+    plots_dir=Path("plots/preprocessing"),
+    filename="trial_counts.png",
+):
+    """
+    Plot number of rows/trials per unit.
+    """
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    trial_counts = df.groupby(list(unit_cols)).size().rename("n_trials").reset_index()
+
+    x_labels = [
+        "_".join(str(row[col]) for col in unit_cols)
+        for _, row in trial_counts.iterrows()
+    ]
+
+    fig, ax = plt.subplots(figsize=(16, 4))
+
+    ax.bar(np.arange(len(trial_counts)), trial_counts["n_trials"].to_numpy())
+
+    ax.set_xticks(np.arange(len(trial_counts)))
+    ax.set_xticklabels(
+        x_labels,
+        rotation=90,
+        fontsize=6,
+    )
+
+    ax.set_xlabel("Unit")
+    ax.set_ylabel("Trial count")
+    ax.set_title("Number of trials per unit")
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(plots_dir / filename, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print("\nTrial count summary:")
+    print(f"  Mean: {trial_counts['n_trials'].mean():.2f}")
+    print(f"  SD: {trial_counts['n_trials'].std(ddof=1):.2f}")
+    print(f"  Median: {trial_counts['n_trials'].median():.2f}")
+
+
+def plot_random_sdfs(
+    df,
+    *,
+    time_col="sdf_time",
+    rate_col="sdf_rate",
+    plots_dir=Path("plots/preprocessing"),
+    filename="random_10_sdfs.png",
+    n_examples=10,
+    random_state=0,
+):
+    """
+    Plot random example SDFs from valid rows.
+    """
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    valid_sdf = df[
+        df[time_col].apply(is_valid_array) & df[rate_col].apply(is_valid_array)
+    ].copy()
+
+    n_plot = min(n_examples, len(valid_sdf))
+
+    if n_plot == 0:
+        print("No valid SDFs available for random SDF plot.")
+        return None
+
+    rng = np.random.default_rng(random_state)
+    sample_idx = rng.choice(valid_sdf.index, size=n_plot, replace=False)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    for idx in sample_idx:
+        row = valid_sdf.loc[idx]
+
+        t = np.asarray(row[time_col], dtype=float)
+        r = np.asarray(row[rate_col], dtype=float)
+
+        label = f"unit {row['unit_ID']}, trial {row['trial_index']}"
+
+        if "session" in row.index:
+            label = f"{row['session']}, {label}"
+
+        ax.plot(
+            t,
+            r,
+            lw=1.2,
+            alpha=0.8,
+            label=label,
+        )
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Firing rate (Hz)")
+    ax.set_title("Random example SDFs")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=6, frameon=False, ncol=2)
+
+    fig.tight_layout()
+    fig.savefig(plots_dir / filename, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return plots_dir / filename
+
+
+def plot_event_diagnostics(
+    df,
+    *,
+    plots_dir=Path("plots/sdf"),
+):
+    """
+    Plot basic event-time diagnostics:
+        1. cue and movement onset distributions
+        2. cue-to-movement delay by effector
+    """
+    plots_dir = Path(plots_dir)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------
+    # Event-time distributions
+    # ------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    for col, label in [
+        ("t_cue", "Cue"),
+        ("t_mov", "Movement"),
+    ]:
+        if col not in df.columns:
+            continue
+
+        values = df[col].to_numpy(dtype=float)
+        values = values[np.isfinite(values)]
+
+        if values.size == 0:
+            continue
+
+        ax.hist(
+            values,
+            bins=80,
+            alpha=0.5,
+            label=label,
+        )
+
+    ax.set_xlabel("Event time (s)")
+    ax.set_ylabel("Count")
+    ax.set_title("Event-time distributions")
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(
+        plots_dir / "event_time_distributions.png",
+        dpi=250,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+    # ------------------------------------------------------------
+    # Cue-to-movement delay by effector
+    # ------------------------------------------------------------
+    required = {"t_cue", "t_mov", "effector"}
+
+    if not required.issubset(df.columns):
+        return
+
+    plot_df = df.dropna(subset=["t_cue", "t_mov", "effector"]).copy()
+    plot_df["cue_to_mov_delay"] = plot_df["t_mov"].to_numpy(dtype=float) - plot_df[
+        "t_cue"
+    ].to_numpy(dtype=float)
+
+    plot_df = plot_df[np.isfinite(plot_df["cue_to_mov_delay"])]
+
+    if plot_df.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+
+    effectors = sorted(plot_df["effector"].dropna().unique())
+
+    data = [
+        plot_df.loc[
+            plot_df["effector"] == effector,
+            "cue_to_mov_delay",
+        ].to_numpy(dtype=float)
+        for effector in effectors
+    ]
+
+    ax.boxplot(
+        data,
+        labels=effectors,
+        showfliers=False,
+    )
+
+    ax.set_xlabel("Effector")
+    ax.set_ylabel("Cue to movement delay (s)")
+    ax.set_title("Cue-to-movement delay by effector")
+    ax.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(
+        plots_dir / "cue_to_movement_delay_by_effector.png",
+        dpi=250,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
 def padded_range(v, pad_frac=0.08):
     vmin = np.nanmin(v)
     vmax = np.nanmax(v)
@@ -698,6 +909,93 @@ def plot_random_shifted_sdfs(
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return out_path
+
+
+def plot_first_row_ci_windows(
+    df,
+    *,
+    time_col="analysis_time",
+    ci_cols=("cueCI", "planCI", "goCI", "movCI"),
+    out_path=Path("plots/tdr_cue/ci_windows_first_row.png"),
+):
+    """
+    Plot CI regressor windows from the first row of df.
+
+    This is mainly a sanity check that cueCI, planCI, goCI, and movCI
+    are active at the expected times.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if len(df) == 0:
+        raise ValueError("Cannot plot CI windows from an empty dataframe.")
+
+    required_cols = [time_col] + list(ci_cols)
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+
+    row = df.iloc[0]
+    t = np.asarray(row[time_col], dtype=float)
+
+    if t.ndim != 1 or t.size == 0 or not np.all(np.isfinite(t)):
+        raise ValueError(f"{time_col} is not a valid 1D finite array.")
+
+    fig, ax = plt.subplots(figsize=(10, 4.5), constrained_layout=True)
+
+    offset_step = 1.25
+
+    for i, col in enumerate(ci_cols):
+        y = np.asarray(row[col], dtype=float)
+
+        if y.shape != t.shape:
+            raise ValueError(
+                f"{col} has shape {y.shape}, but {time_col} has shape {t.shape}."
+            )
+
+        ax.plot(
+            t,
+            y + i * offset_step,
+            lw=2,
+            label=col,
+        )
+
+    # Event markers from the same row
+    event_specs = [
+        ("Cue", "t_cue", "--"),
+        ("GO", "t_go", ":"),
+        ("Movement", "t_mov", "-."),
+        ("Movement end", "t_mov_end", "-"),
+    ]
+
+    for label, col, linestyle in event_specs:
+        if col in df.columns:
+            event_time = row[col]
+            if np.isfinite(event_time):
+                ax.axvline(
+                    float(event_time),
+                    color="k",
+                    linestyle=linestyle,
+                    linewidth=1.0,
+                    alpha=0.7,
+                    label=label,
+                )
+
+    ax.set_xlabel("Time relative to cue onset (s)")
+    ax.set_ylabel("CI regressor value, vertically shifted")
+    ax.set_title("Condition-independent regressor windows")
+    ax.grid(alpha=0.25)
+    ax.legend(
+        frameon=False,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0,
+    )
+
+    fig.savefig(out_path, dpi=250, bbox_inches="tight")
     plt.close(fig)
 
     return out_path
