@@ -4,6 +4,7 @@ from sklearn.linear_model import LinearRegression
 import matplotlib.pyplot as plt
 
 from scripts.utils import *
+from scripts.plotting import *
 
 
 def add_tdr_int_regressors(df, interaction=False):
@@ -665,3 +666,318 @@ def time_resolved_var_by_tdr_axes(
                 }
             )
     return pd.DataFrame(rows)
+
+    """
+    Plot real axis separation against shuffled null distribution.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    t = np.asarray(analysis_time, dtype=float)
+    real_sep = np.asarray(real_sep, dtype=float)
+    null_sep = np.asarray(null_sep, dtype=float)
+
+    null_mean = np.nanmean(null_sep, axis=0)
+    null_lo = np.nanpercentile(null_sep, 2.5, axis=0)
+    null_hi = np.nanpercentile(null_sep, 97.5, axis=0)
+
+    fig, ax = plt.subplots(figsize=(9, 4.5), constrained_layout=True)
+
+    ax.fill_between(
+        t,
+        null_lo,
+        null_hi,
+        alpha=0.25,
+        linewidth=0,
+        label="Shuffle 95% interval",
+    )
+
+    ax.plot(
+        t,
+        null_mean,
+        lw=1.5,
+        linestyle="--",
+        label="Shuffle mean",
+    )
+
+    ax.plot(
+        t,
+        real_sep,
+        lw=2.2,
+        label="Real separation",
+    )
+
+    if p_values is not None:
+        sig = np.asarray(p_values) < alpha
+
+        if np.any(sig):
+            y_sig = np.nanmax([np.nanmax(real_sep), np.nanmax(null_hi)])
+            y_sig = y_sig + 0.05 * np.abs(y_sig)
+
+            ax.plot(
+                t[sig],
+                np.full(np.sum(sig), y_sig),
+                linestyle="None",
+                marker=".",
+                markersize=3,
+                label=f"p < {alpha}",
+            )
+
+    if event_times is not None:
+        if event_labels is None:
+            event_labels = [None] * len(event_times)
+
+        for x, label in zip(event_times, event_labels):
+            ax.axvline(
+                x,
+                color="k",
+                linestyle=":",
+                linewidth=1.0,
+                alpha=0.75,
+                label=label,
+            )
+
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(alpha=0.25)
+    ax.legend(frameon=False)
+
+    fig.savefig(out_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+
+    return out_path
+
+
+def shuffle_regressor_columns_within_unit(
+    df,
+    *,
+    regressors_to_shuffle,
+    unit_cols=("unit_ID",),
+    random_state=0,
+):
+    """
+    Shuffle selected regressor columns within each unit.
+
+    Neural activity and condition labels are unchanged.
+    Only the relationship between task regressors and neural activity is destroyed.
+
+    This works for both scalar regressors and array-valued regressors.
+    """
+    rng = np.random.default_rng(random_state)
+    df_shuf = df.copy()
+
+    for _, unit_df in df_shuf.groupby(list(unit_cols), sort=False):
+        idx = unit_df.index.to_numpy()
+
+        if len(idx) <= 1:
+            continue
+
+        # Use one permutation for all shuffled regressors.
+        # This preserves correlations among the shuffled task regressors.
+        perm = rng.permutation(len(idx))
+
+        for reg in regressors_to_shuffle:
+            values = df_shuf.loc[idx, reg].to_numpy(dtype=object)
+            shuffled_values = values[perm]
+
+            df_shuf.loc[idx, reg] = pd.Series(
+                list(shuffled_values),
+                index=idx,
+                dtype=object,
+            )
+
+    return df_shuf
+
+
+def add_target_y_position_label(
+    df,
+    *,
+    y_col="space_y",
+    out_col="target_y_position",
+    eps=1e-3,
+):
+    """
+    Add a binary up/down target-position label from vertical target position.
+
+    up:
+        target is above fixation / center.
+
+    down:
+        target is below fixation / center.
+
+    Values close to zero are set to NaN, because they are neither up nor down.
+    """
+    df = df.copy()
+
+    if y_col not in df.columns:
+        raise ValueError(f"Missing required column: {y_col}")
+
+    y = df[y_col].to_numpy(dtype=float)
+
+    df[out_col] = pd.Series(np.nan, index=df.index, dtype="object")
+    df.loc[y > eps, out_col] = "up"
+    df.loc[y < -eps, out_col] = "down"
+
+    return df
+
+
+def train_test_split_within_unit_condition(
+    df,
+    *,
+    unit_col="unit_ID",
+    condition_cols=("effector", "reach_hand", "target_hemifield"),
+    test_frac=0.5,
+    min_train_trials=2,
+    min_test_trials=2,
+    random_state=0,
+):
+    """
+    Split rows into train/test separately within each unit x condition cell.
+
+    This ensures that:
+        - every unit contributes train and test trials
+        - every condition is represented in train and test
+        - TDR axes are fit only on train trials
+        - test condition averages are independent of axis fitting
+    """
+    rng = np.random.default_rng(random_state)
+
+    train_indices = []
+    test_indices = []
+
+    group_cols = [unit_col] + list(condition_cols)
+
+    for _, group_df in df.groupby(group_cols, sort=False):
+        idx = group_df.index.to_numpy()
+        n = len(idx)
+
+        n_test = int(np.floor(test_frac * n))
+        n_test = max(min_test_trials, n_test)
+        n_test = min(n_test, n - min_train_trials)
+
+        if n_test < min_test_trials or (n - n_test) < min_train_trials:
+            # Skip this unit-condition cell if it cannot support the split.
+            continue
+
+        shuffled = rng.permutation(idx)
+
+        test_idx = shuffled[:n_test]
+        train_idx = shuffled[n_test:]
+
+        train_indices.extend(train_idx)
+        test_indices.extend(test_idx)
+
+    train_df = df.loc[train_indices].copy().reset_index(drop=True)
+    test_df = df.loc[test_indices].copy().reset_index(drop=True)
+
+    # Keep only units that survived in both train and test.
+    train_units = set(train_df[unit_col].unique())
+    test_units = set(test_df[unit_col].unique())
+    common_units = sorted(train_units & test_units)
+
+    train_df = train_df[train_df[unit_col].isin(common_units)].reset_index(drop=True)
+    test_df = test_df[test_df[unit_col].isin(common_units)].reset_index(drop=True)
+
+    print("\nTrain/test split:")
+    print(f"  Train rows: {len(train_df)}")
+    print(f"  Test rows:  {len(test_df)}")
+    print(f"  Common units: {len(common_units)}")
+
+    return train_df, test_df
+
+
+def stack_projection_repeats(projection_repeats, cond_order, axis_names):
+    """
+    Convert repeated projection dictionaries into:
+        mean_proj[cond]: n_axes x n_time
+        sem_proj[cond]:  n_axes x n_time
+
+    projection_repeats is a list of dicts:
+        projection_repeats[repeat][condition] = n_axes x n_time
+    """
+    mean_proj = {}
+    sem_proj = {}
+
+    for cond in cond_order:
+        arr = np.stack(
+            [rep[cond] for rep in projection_repeats if cond in rep],
+            axis=0,
+        )
+        # arr shape: n_repeats x n_axes x n_time
+
+        mean_proj[cond] = np.nanmean(arr, axis=0)
+
+        n = np.sum(np.all(np.isfinite(arr), axis=(1, 2)))
+        sem_proj[cond] = np.nanstd(arr, axis=0, ddof=1) / np.sqrt(arr.shape[0])
+
+    return mean_proj, sem_proj
+
+
+def bootstrap_resample_units(
+    df,
+    *,
+    unit_col="unit_ID",
+    boot_unit_col="bootstrap_unit_ID",
+    random_state=0,
+):
+    """
+    Resample units with replacement.
+
+    Important:
+        If the same unit is sampled multiple times, each copy is given
+        a new bootstrap unit ID. This lets the population contain duplicate
+        units, as required for unit bootstrap.
+    """
+    rng = np.random.default_rng(random_state)
+
+    units = np.asarray(sorted(df[unit_col].dropna().unique()))
+    n_units = len(units)
+
+    sampled_units = rng.choice(units, size=n_units, replace=True)
+
+    boot_dfs = []
+
+    for boot_idx, unit in enumerate(sampled_units):
+        unit_df = df[df[unit_col] == unit].copy()
+
+        # Give each sampled copy a unique unit identity
+        unit_df[boot_unit_col] = f"boot{boot_idx:04d}_unit{unit}"
+
+        boot_dfs.append(unit_df)
+
+    boot_df = pd.concat(boot_dfs, ignore_index=True)
+
+    return boot_df, sampled_units
+
+
+def stack_projection_bootstraps(
+    projection_bootstraps,
+    cond_order,
+):
+    """
+    Convert bootstrap projection dictionaries into mean and 95% CI.
+
+    projection_bootstraps[bootstrap][condition] = n_axes x n_time
+
+    Returns:
+        mean_proj[cond]
+        lower_proj[cond]
+        upper_proj[cond]
+    """
+    mean_proj = {}
+    lower_proj = {}
+    upper_proj = {}
+
+    for cond in cond_order:
+        arr = np.stack(
+            [boot[cond] for boot in projection_bootstraps if cond in boot],
+            axis=0,
+        )
+        # arr shape: n_bootstrap x n_axes x n_time
+
+        mean_proj[cond] = np.nanmean(arr, axis=0)
+        lower_proj[cond] = np.nanpercentile(arr, 2.5, axis=0)
+        upper_proj[cond] = np.nanpercentile(arr, 97.5, axis=0)
+
+    return mean_proj, lower_proj, upper_proj

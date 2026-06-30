@@ -772,6 +772,11 @@ def plot_temporal_generalization_matrix(
     event_labels=None,
     vmin=None,
     vmax=1.0,
+    title_fontsize=18,
+    label_fontsize=16,
+    tick_fontsize=13,
+    colorbar_fontsize=14,
+    legend_fontsize=12,
 ):
     """
     Plot temporal generalization accuracy matrix.
@@ -813,7 +818,8 @@ def plot_temporal_generalization_matrix(
     )
 
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Decoding accuracy")
+    cbar.set_label("Decoding accuracy", fontsize=colorbar_fontsize)
+    cbar.ax.tick_params(labelsize=tick_fontsize)
 
     # Diagonal: train time = test time
     ax.plot(
@@ -826,6 +832,8 @@ def plot_temporal_generalization_matrix(
         label="train = test",
     )
 
+    event_color = "k"
+
     # Optional event markers on both train and test axes.
     if event_times is not None:
         if event_labels is None:
@@ -834,16 +842,16 @@ def plot_temporal_generalization_matrix(
         for event_time, event_label in zip(event_times, event_labels):
             ax.axvline(
                 event_time,
-                color="k",
+                color=event_color,
                 linestyle=":",
-                linewidth=1.0,
+                linewidth=2.0,
                 alpha=0.8,
             )
             ax.axhline(
                 event_time,
-                color="k",
+                color=event_color,
                 linestyle=":",
-                linewidth=1.0,
+                linewidth=2.0,
                 alpha=0.8,
                 label=event_label,
             )
@@ -851,14 +859,27 @@ def plot_temporal_generalization_matrix(
     if chance is not None:
         title = f"{title} | chance = {chance:.2f}"
 
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
+    ax.set_title(title, fontsize=title_fontsize)
+    ax.set_xlabel(xlabel, fontsize=label_fontsize)
+    ax.set_ylabel(ylabel, fontsize=label_fontsize)
 
-    if event_times is not None or True:
-        ax.legend(frameon=False, fontsize=8, loc="upper right")
+    ax.tick_params(axis="both", labelsize=tick_fontsize)
 
-    fig.savefig(out_path, dpi=250, bbox_inches="tight")
+    legend = ax.legend(
+        frameon=True,
+        fontsize=14,
+        loc="upper left",
+        facecolor="white",
+        edgecolor="0.8",
+        framealpha=0.7,
+        fancybox=True,
+    )
+
+    for text in legend.get_texts():
+        if text.get_text() != "train = test":
+            text.set_color(event_color)
+
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
     return out_path

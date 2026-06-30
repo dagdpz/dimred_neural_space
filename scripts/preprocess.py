@@ -584,10 +584,10 @@ def zscore_rates(
 
 
 def build_processed_trials(
-    data_dir=Path("data/new_data"),
-    old_data_dir=Path("data/old_data"),
+    data_dir=Path("data/new_data/flaffus"),
     *,
     use_old_data=False,
+    old_data_dir=Path("data/old_data"),
     sqrt_transform=True,
     zscore=False,
     min_mean_rate=1.0,
@@ -689,6 +689,17 @@ def build_processed_trials(
     print(f"  Units: {df[['session', 'unit_ID']].drop_duplicates().shape[0]}")
     print(f"  Sessions: {df['session'].nunique()}")
 
+    trials_per_unit = (
+        df.groupby(["session", "unit_ID"]).size().rename("n_trials").reset_index()
+    )
+
+    mean_trials = trials_per_unit["n_trials"].mean()
+    sd_trials = trials_per_unit["n_trials"].std(ddof=1)
+
+    print("\nTrials per unit:")
+    print(f"  Mean: {mean_trials:.2f}")
+    print(f"  SD:   {sd_trials:.2f}")
+
     # ------------------------------------------------------------
     # Optional trial-count diagnostic before filtering
     # ------------------------------------------------------------
@@ -721,7 +732,8 @@ def build_processed_trials(
         time_col="sdf_time",
         rate_col="sdf_rate",
         bin_size=bin_size,
-        sigma=sigma,
+        sigma=0.05,
+        # sigma=sigma,
     )
 
     # ------------------------------------------------------------
@@ -777,14 +789,61 @@ def build_processed_trials(
         index=False,
     )
 
+    trials_per_unit = (
+        df.groupby(["session", "unit_ID"]).size().rename("n_trials").reset_index()
+    )
+
+    mean_trials = trials_per_unit["n_trials"].mean()
+    sd_trials = trials_per_unit["n_trials"].std(ddof=1)
+
+    print("\nTrials per unit:")
+    print(f"  Mean: {mean_trials:.2f}")
+    print(f"  SD:   {sd_trials:.2f}")
+    print(f"  Units: {df[['session', 'unit_ID']].drop_duplicates().shape[0]}")
+
     # ------------------------------------------------------------
     # Optional sqrt transform
     # ------------------------------------------------------------
     if sqrt_transform:
+
+        raw_rates_before_sqrt = df["sdf_rate"].copy()
+
         df = sqrt_transform_rates(
             df,
             rate_col="sdf_rate",
         )
+
+        sqrt_rates_after = df["sdf_rate"].copy()
+
+        if plot:
+            fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
+
+            raw_vals = np.concatenate(raw_rates_before_sqrt.to_numpy()).astype(float)
+            sqrt_vals = np.concatenate(sqrt_rates_after.to_numpy()).astype(float)
+
+            raw_vals = raw_vals[np.isfinite(raw_vals)]
+            sqrt_vals = sqrt_vals[np.isfinite(sqrt_vals)]
+
+            axes[0].hist(raw_vals, bins=100, edgecolor="black", alpha=0.75)
+            axes[0].set_title("Before sqrt transform")
+            axes[0].set_xlabel("Firing rate (Hz)")
+            axes[0].set_ylabel("Count")
+            axes[0].grid(alpha=0.3)
+
+            axes[1].hist(sqrt_vals, bins=100, edgecolor="black", alpha=0.75)
+            axes[1].set_title("After sqrt transform")
+            axes[1].set_xlabel("sqrt(firing rate)")
+            axes[1].set_ylabel("Count")
+            axes[1].grid(alpha=0.3)
+
+            fig.suptitle("Firing-rate distributions before and after sqrt transform")
+
+            fig.savefig(
+                plots_dir / "rate_distribution_before_after_sqrt.pdf",
+                dpi=300,
+                bbox_inches="tight",
+            )
+            plt.close(fig)
 
     # ------------------------------------------------------------
     # Optional per-unit z-scoring
@@ -809,7 +868,7 @@ def build_processed_trials(
 def save_processed_trials(
     df,
     *,
-    path=PROCESSED_TRIALS_PATH,
+    path=Path("data/new_data/flaffus"),
 ):
     """
     Save processed trials to disk.
@@ -818,8 +877,7 @@ def save_processed_trials(
         processed_trials.pkl
         processed_trials_normalized.pkl
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = Path(path) / "processed_trials.pkl"
     df.to_pickle(path, compression="gzip")
     print(f"Wrote {len(df)} rows to {path}")
     return path
@@ -835,7 +893,7 @@ def load_processed_trials(
     Loads:
         processed_trials.pkl
     """
-    path = Path(path)
+    path = Path(path) / "processed_trials.pkl"
 
     if not path.exists():
         raise FileNotFoundError(f"Missing {path}. Run `python 0_preprocess.py` first.")

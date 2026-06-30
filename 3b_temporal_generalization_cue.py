@@ -14,6 +14,7 @@ from scripts.decoding_functions import *
 
 
 def main(
+    data_dir="data/new_data/flaffus",
     plot=False,
     plots_dir=Path("plots/tgm_cue_aligned"),
 ):
@@ -23,7 +24,7 @@ def main(
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_processed_trials(normalized=True)
+    df = load_processed_trials(path=data_dir)
 
     # ------------------------------------------------------------
     # Align spikes to cue and movement
@@ -297,6 +298,12 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--data_dir",
+        type=str,
+        default="data/new_data/flaffus",
+        help="Folder containing new-format population_*.mat and trials_*.mat files.",
+    )
+    parser.add_argument(
         "--plot",
         action="store_true",
         default=False,
@@ -310,6 +317,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(
+        data_dir=args.data_dir,
         plot=args.plot,
         plots_dir=args.plots_dir,
     )

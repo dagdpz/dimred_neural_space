@@ -349,9 +349,6 @@ def main(
         & df["analysis_time"].apply(is_valid_array)
     ].reset_index(drop=True)
 
-    # ------------------------------------------------------------
-    # Fit TDR axes
-    # ------------------------------------------------------------
     regressors = (
         # CI regressors
         "cueCI",
@@ -376,133 +373,6 @@ def main(
         "contra_hand_space_y_mov",
     )
 
-    axes_raw, axes_ortho, units, task_regressors = fit_tdr_axes(
-        df,
-        regressors=regressors,
-        rate_col="analysis_rate",
-        time_col="analysis_time",
-    )
-
-    # ------------------------------------------------------------
-    # TDR beta/effect-size statistics
-    # ------------------------------------------------------------
-    beta_unit_stats, beta_summary, beta_axis_summary = summarize_tdr_beta_effect_sizes(
-        axes_raw,
-        task_regressors,
-        units=units,
-    )
-
-    beta_unit_stats.to_csv(
-        plots_dir / "tdr_beta_effect_sizes_by_unit.csv",
-        index=False,
-    )
-
-    beta_summary.to_csv(
-        plots_dir / "tdr_beta_effect_size_summary.csv",
-        index=False,
-    )
-
-    beta_axis_summary.to_csv(
-        plots_dir / "tdr_beta_axis_strength_summary.csv",
-        index=False,
-    )
-
-    print("\nTDR beta effect-size summary:")
-    print(beta_summary)
-
-    print("\nTDR raw axis strength:")
-    print(beta_axis_summary)
-
-    # ------------------------------------------------------------
-    # Condition-averaged trajectories + projections
-    # ------------------------------------------------------------
-    condition_pops_target_pos = condition_mean_population(
-        df,
-        units,
-        condition_cols=("space_x", "space_y"),
-        unit_cols=("unit_ID",),  # use ("session", "unit_ID") if you keep session
-        rate_col="analysis_rate",
-    )
-
-    projections_target_pos, _ = project_trajectories(
-        condition_pops_target_pos,
-        axes_ortho,
-        task_regressors,
-    )
-    axis_names = list(task_regressors)
-    cond_order = sorted(projections_target_pos.keys())
-
-    plot_target_position_axis_timecourse(
-        projections_target_pos,
-        analysis_time,
-        axis_names,
-        axis="space_x_cue",
-        cond_order=cond_order,
-        out_path=plots_dir / "target_position_x_cue.pdf",
-        downsample=5,
-        event_times=event_times,
-        event_labels=event_labels,
-        event_linestyles=event_linestyles,
-        event_colors=event_colors,
-        event_linewidths=event_linewidths,
-        event_alphas=event_alphas,
-    )
-
-    plot_target_position_axis_timecourse(
-        projections_target_pos,
-        analysis_time,
-        axis_names,
-        axis="space_y_cue",
-        cond_order=cond_order,
-        out_path=plots_dir / "target_position_y_cue.pdf",
-        downsample=5,
-        event_times=event_times,
-        event_labels=event_labels,
-        event_linestyles=event_linestyles,
-        event_colors=event_colors,
-        event_linewidths=event_linewidths,
-        event_alphas=event_alphas,
-    )
-
-    # ------------------------------------------------------------
-    # Debug 8-condition counts before condition averaging
-    # ------------------------------------------------------------
-    expected_8cond = [
-        ("reach", "ipsi", "ipsi"),
-        ("reach", "ipsi", "contra"),
-        ("reach", "contra", "ipsi"),
-        ("reach", "contra", "contra"),
-        ("saccade", "ipsi", "ipsi"),
-        ("saccade", "ipsi", "contra"),
-        ("saccade", "contra", "ipsi"),
-        ("saccade", "contra", "contra"),
-    ]
-
-    counts_8cond = (
-        df.groupby(["effector", "reach_hand", "target_hemifield"])
-        .size()
-        .rename("n_rows")
-        .reindex(
-            pd.MultiIndex.from_tuples(
-                expected_8cond,
-                names=["effector", "reach_hand", "target_hemifield"],
-            ),
-            fill_value=0,
-        )
-        .reset_index()
-    )
-
-    print("\n8-condition row counts before condition averaging:")
-    print(counts_8cond)
-
-    counts_8cond.to_csv(
-        plots_dir / "8_condition_row_counts_before_averaging.csv",
-        index=False,
-    )
-
-    # ------------------------------------------------------------
-    # Plot 8 projected conditions on all 15 condition-dependent axes
-    # ------------------------------------------------------------
     condition_dependent_axes = [
         "cueCI",
         "planCI",
@@ -529,24 +399,14 @@ def main(
     ]
 
     # ------------------------------------------------------------
-    # 8-condition averaged trajectories:
-    # effector x hand x target hemifield
+    # Train/test split control with repeated splits
     # ------------------------------------------------------------
-    condition_pops_8cond = condition_mean_population(
-        df,
-        units,
-        condition_cols=("effector", "reach_hand", "target_hemifield"),
-        unit_cols=("unit_ID",),
-        rate_col="analysis_rate",
-    )
+    n_repeats = 30
+    test_frac = 0.3
 
-    projections_8cond, _ = project_trajectories(
-        condition_pops_8cond,
-        axes_ortho,
-        task_regressors,
-    )
-
-    axis_names = list(task_regressors)
+    projection_repeats = []
+    axis_names = None
+    task_regressors_ref = None
 
     cond_order_8cond = [
         ("reach", "ipsi", "ipsi"),
@@ -559,28 +419,86 @@ def main(
         ("saccade", "contra", "contra"),
     ]
 
-    # Keep only conditions that actually exist in the projections dict
-    cond_order_8cond = [cond for cond in cond_order_8cond if cond in projections_8cond]
+    for repeat_idx in range(n_repeats):
+        print(f"\nTrain/test repeat {repeat_idx + 1}/{n_repeats}")
 
-    print("\n8-condition averaged trajectories:")
-    for cond in cond_order_8cond:
-        print(cond, projections_8cond[cond].shape)
+        train_df, test_df = train_test_split_within_unit_condition(
+            df,
+            unit_col="unit_ID",
+            condition_cols=("effector", "reach_hand", "target_hemifield"),
+            test_frac=test_frac,
+            min_train_trials=2,
+            min_test_trials=2,
+            random_state=repeat_idx,
+        )
 
-    out_dir_8cond = plots_dir / "8_condition_axis_timecourses"
-    out_dir_8cond.mkdir(parents=True, exist_ok=True)
+        axes_raw_train, axes_ortho_train, units_train, task_regressors_train = (
+            fit_tdr_axes(
+                train_df,
+                regressors=regressors,
+                rate_col="analysis_rate",
+                time_col="analysis_time",
+                unit_cols=("unit_ID",),
+            )
+        )
+
+        if axis_names is None:
+            axis_names = list(task_regressors_train)
+            task_regressors_ref = task_regressors_train
+        else:
+            if list(task_regressors_train) != axis_names:
+                raise ValueError("Axis order changed across train/test repeats.")
+
+        condition_pops_8cond_test = condition_mean_population(
+            test_df,
+            units_train,
+            condition_cols=("effector", "reach_hand", "target_hemifield"),
+            unit_cols=("unit_ID",),
+            rate_col="analysis_rate",
+        )
+
+        projections_8cond_test, _ = project_trajectories(
+            condition_pops_8cond_test,
+            axes_ortho_train,
+            task_regressors_train,
+        )
+
+        projection_repeats.append(projections_8cond_test)
+
+    # Keep only conditions present in all / most repeats
+    cond_order_8cond = [
+        cond
+        for cond in cond_order_8cond
+        if any(cond in rep for rep in projection_repeats)
+    ]
+
+    # ------------------------------------------------------------
+    # Mean ± SEM across repeated train/test splits
+    # ------------------------------------------------------------
+    projections_8cond_mean, projections_8cond_sem = stack_projection_repeats(
+        projection_repeats,
+        cond_order_8cond,
+        axis_names,
+    )
+
+    out_dir_8cond_test = (
+        plots_dir / "train_test_split" / "test_8_condition_axis_timecourses_sem"
+    )
+    out_dir_8cond_test.mkdir(parents=True, exist_ok=True)
 
     for axis in condition_dependent_axes:
         if axis not in axis_names:
             print(f"Skipping {axis}: not found in axis_names")
             continue
 
-        plot_tdr_axis_timecourse(
-            projections_8cond,
+        plot_tdr_axis_timecourse_with_sem(
+            projections_8cond_mean,
+            projections_8cond_sem,
             analysis_time,
             axis_names,
             axis=axis,
             cond_order=cond_order_8cond,
-            out_path=out_dir_8cond / f"{axis}.pdf",
+            out_path=out_dir_8cond_test / f"test_time_{axis}_mean_sem.png",
             downsample=5,
             event_times=event_times,
             event_labels=event_labels,
@@ -590,27 +508,120 @@ def main(
             event_alphas=event_alphas,
         )
 
+    out_dir_plan_mov_2d = (
+        plots_dir / "train_test_split" / "test_8_condition_plan_vs_mov_2d"
+    )
+    out_dir_plan_mov_2d.mkdir(parents=True, exist_ok=True)
+
+    plan_mov_axis_pairs = [
+        (
+            "saccade_space_x_plan",
+            "saccade_space_x_mov",
+        ),
+        (
+            "ipsi_hand_space_x_plan",
+            "ipsi_hand_space_x_mov",
+        ),
+        (
+            "contra_hand_space_x_plan",
+            "contra_hand_space_x_mov",
+        ),
+        (
+            "saccade_space_y_plan",
+            "saccade_space_y_mov",
+        ),
+        (
+            "ipsi_hand_space_y_plan",
+            "ipsi_hand_space_y_mov",
+        ),
+        (
+            "contra_hand_space_y_plan",
+            "contra_hand_space_y_mov",
+        ),
+    ]
+
+    for plan_axis, mov_axis in plan_mov_axis_pairs:
+        if plan_axis not in axis_names or mov_axis not in axis_names:
+            print(f"Skipping {plan_axis} vs {mov_axis}: axis not found")
+            continue
+
+        plot_tdr_plan_vs_movement_2d(
+            projections_8cond_mean,
+            analysis_time,
+            axis_names,
+            plan_axis=plan_axis,
+            mov_axis=mov_axis,
+            cond_order=cond_order_8cond,
+            out_path=out_dir_plan_mov_2d / f"{plan_axis}_vs_{mov_axis}.png",
+            downsample=10,
+            event_times=event_times,
+            event_labels=event_labels,
+            title=f"{plan_axis} vs {mov_axis}",
+        )
+
     # ------------------------------------------------------------
-    # 8-condition averaged trajectories:
-    # effector x hand x vertical position
+    # Train/test split control for vertical target position
+    # effector x reach_hand x target_y_position
     # ------------------------------------------------------------
-    condition_pops_8cond_vert = condition_mean_population(
-        df,
-        units,
-        condition_cols=("effector", "reach_hand", "target_y_position"),
+    df_y = df.dropna(subset=["target_y_position"]).copy()
+
+    condition_cols_y = ("effector", "reach_hand", "target_y_position")
+
+    condition_levels_y = {
+        "effector": ["reach", "saccade"],
+        "reach_hand": ["ipsi", "contra"],
+        "target_y_position": ["up", "down"],
+    }
+
+    # ------------------------------------------------------------
+    # keep only units with enough trials in every vertical condition
+    # ------------------------------------------------------------
+    min_trials_per_y_condition = 5
+
+    trials_per_ycond = count_rows_per_unit_condition(
+        df_y,
         unit_cols=("unit_ID",),
-        rate_col="analysis_rate",
+        condition_cols=condition_cols_y,
+        condition_levels=condition_levels_y,
     )
 
-    projections_8cond_vert, _ = project_trajectories(
-        condition_pops_8cond_vert,
-        axes_ortho,
-        task_regressors,
+    trials_per_ycond.to_csv(
+        plots_dir / "rows_per_unit_per_y_condition.csv",
+        index=False,
     )
 
-    axis_names = list(task_regressors)
+    good_units_y = trials_per_ycond.groupby("unit_ID")["n_rows"].min().reset_index()
 
-    cond_order_8cond_vert = [
+    good_units_y = good_units_y[good_units_y["n_rows"] >= min_trials_per_y_condition][
+        ["unit_ID"]
+    ]
+
+    n_units_y_before = df_y["unit_ID"].nunique()
+
+    df_y = df_y.merge(
+        good_units_y,
+        on="unit_ID",
+        how="inner",
+    ).reset_index(drop=True)
+
+    n_units_y_after = df_y["unit_ID"].nunique()
+
+    print("\nVertical up/down condition filtering:")
+    print(f"  Units before y-condition filtering: {n_units_y_before}")
+    print(
+        f"  Units after requiring >= {min_trials_per_y_condition} trial(s) "
+        "in every effector x hand x up/down condition: "
+        f"{n_units_y_after}"
+    )
+    print(f"  Rows after y-condition filtering: {len(df_y)}")
+
+    n_repeats = 30
+    test_frac = 0.3
+
+    projection_repeats_y = []
+    axis_names_y = None
+
+    cond_order_8cond_y = [
         ("reach", "ipsi", "up"),
         ("reach", "ipsi", "down"),
         ("reach", "contra", "up"),
@@ -621,209 +632,116 @@ def main(
         ("saccade", "contra", "down"),
     ]
 
-    # Keep only conditions that actually exist in the projections dict
-    cond_order_8cond_vert = [
-        cond for cond in cond_order_8cond_vert if cond in projections_8cond_vert
-    ]
+    for repeat_idx in range(n_repeats):
+        print(f"\nVertical train/test repeat {repeat_idx + 1}/{n_repeats}")
 
-    print("\n8-condition averaged trajectories:")
-    for cond in cond_order_8cond_vert:
-        print(cond, projections_8cond_vert[cond].shape)
-
-    out_dir_8cond_vert = plots_dir / "8_condition_axis_timecourses_vert"
-    out_dir_8cond_vert.mkdir(parents=True, exist_ok=True)
-
-    CONDITION_COLORS_Y = {
-        ("reach", "ipsi", "up"): "#005fbf",
-        ("reach", "ipsi", "down"): "#bf00bf",
-        ("reach", "contra", "up"): "#00bf00",
-        ("reach", "contra", "down"): "#bf5f00",
-        ("saccade", "ipsi", "up"): "#007fff",
-        ("saccade", "ipsi", "down"): "#ff00ff",
-        ("saccade", "contra", "up"): "#00ff00",
-        ("saccade", "contra", "down"): "#ff7f00",
-    }
-
-    for axis in condition_dependent_axes:
-        if axis not in axis_names:
-            print(f"Skipping {axis}: not found in axis_names")
-            continue
-        plot_tdr_axis_timecourse(
-            projections_8cond_vert,
-            analysis_time,
-            axis_names,
-            axis=axis,
-            cond_order=cond_order_8cond_vert,
-            cond_colors=CONDITION_COLORS_Y,
-            out_path=out_dir_8cond_vert / f"{axis}.pdf",
-            downsample=5,
-            event_times=event_times,
-            event_labels=event_labels,
-            event_linestyles=event_linestyles,
-            event_colors=event_colors,
-            event_linewidths=event_linewidths,
-            event_alphas=event_alphas,
+        train_df_y, test_df_y = train_test_split_within_unit_condition(
+            df_y,
+            unit_col="unit_ID",
+            condition_cols=condition_cols_y,
+            test_frac=test_frac,
+            min_train_trials=3,
+            min_test_trials=2,
+            random_state=repeat_idx,
         )
 
-    # ------------------------------------------------------------
-    # 4-condition averaged trajectories:
-    # target hemifield x target y position
-    # ------------------------------------------------------------
-    condition_pops_y_hemi = condition_mean_population(
-        df,
-        units,
-        condition_cols=("target_hemifield", "target_y_position"),
-        unit_cols=("unit_ID",),
-        rate_col="analysis_rate",
-    )
-
-    projections_y_hemi, _ = project_trajectories(
-        condition_pops_y_hemi,
-        axes_ortho,
-        task_regressors,
-    )
-
-    axis_names = list(task_regressors)
-
-    cond_order_y_hemi = [
-        ("ipsi", "up"),
-        ("ipsi", "down"),
-        ("contra", "up"),
-        ("contra", "down"),
-    ]
-
-    # Keep only conditions that actually exist
-    cond_order_y_hemi = [
-        cond for cond in cond_order_y_hemi if cond in projections_y_hemi
-    ]
-
-    print("\n4-condition averaged trajectories (target hemifield x y-position):")
-    for cond in cond_order_y_hemi:
-        print(cond, projections_y_hemi[cond].shape)
-
-    out_dir_y_hemi = plots_dir / "4_condition_y_hemi_axis_timecourses"
-    out_dir_y_hemi.mkdir(parents=True, exist_ok=True)
-
-    # Optional labels for legend
-    def cond_label_fn(cond):
-        hemi, ypos = cond
-        return f"{hemi}, {ypos}"
-
-    # If your plotting function supports custom colors, you can use this
-    CONDITION_COLORS_Y_HEMI = {
-        ("ipsi", "up"): "#377eb8",
-        ("ipsi", "down"): "#984ea3",
-        ("contra", "up"): "#4daf4a",
-        ("contra", "down"): "#ff7f00",
-    }
-
-    for axis in condition_dependent_axes:
-        if axis not in axis_names:
-            print(f"Skipping {axis}: not found in axis_names")
-            continue
-
-        plot_tdr_axis_timecourse(
-            projections_y_hemi,
-            analysis_time,
-            axis_names,
-            axis=axis,
-            cond_order=cond_order_y_hemi,
-            cond_label_fn=cond_label_fn,
-            out_path=out_dir_y_hemi / f"{axis}.pdf",
-            downsample=5,
-            event_times=event_times,
-            event_labels=event_labels,
-            event_linestyles=event_linestyles,
-            event_colors=event_colors,
-            event_linewidths=event_linewidths,
-            event_alphas=event_alphas,
+        # Fit TDR axes only on training trials
+        axes_raw_train_y, axes_ortho_train_y, units_train_y, task_regressors_train_y = (
+            fit_tdr_axes(
+                train_df_y,
+                regressors=regressors,
+                rate_col="analysis_rate",
+                time_col="analysis_time",
+                unit_cols=("unit_ID",),
+            )
         )
 
-    # ------------------------------------------------------------
-    # Shuffled TDR control: same plots with shuffled task regressors
-    # ------------------------------------------------------------
+        if axis_names_y is None:
+            axis_names_y = list(task_regressors_train_y)
+        else:
+            if list(task_regressors_train_y) != axis_names_y:
+                raise ValueError(
+                    "Axis order changed across vertical train/test repeats."
+                )
 
-    shuffle_dir = plots_dir / "shuffled_tdr"
-    shuffle_dir.mkdir(parents=True, exist_ok=True)
+        # Build held-out test condition averages:
+        # effector x reach_hand x up/down
+        condition_pops_y_test = condition_mean_population(
+            test_df_y,
+            units_train_y,
+            condition_cols=condition_cols_y,
+            unit_cols=("unit_ID",),
+            rate_col="analysis_rate",
+        )
 
-    ci_regressors = {
+        # Project held-out test trajectories onto train-defined axes
+        projections_y_test, _ = project_trajectories(
+            condition_pops_y_test,
+            axes_ortho_train_y,
+            task_regressors_train_y,
+        )
+
+        projection_repeats_y.append(projections_y_test)
+
+    # Keep only conditions present in at least one repeat
+    cond_order_8cond_y = [
+        cond
+        for cond in cond_order_8cond_y
+        if any(cond in rep for rep in projection_repeats_y)
+    ]
+
+    # ------------------------------------------------------------
+    # Mean ± SEM across repeated train/test splits
+    # ------------------------------------------------------------
+    projections_y_mean, projections_y_sem = stack_projection_repeats(
+        projection_repeats_y,
+        cond_order_8cond_y,
+        axis_names_y,
+    )
+
+    out_dir_y_test = (
+        plots_dir / "train_test_split" / "test_8_condition_axis_timecourses_y_mean_sem"
+    )
+    out_dir_y_test.mkdir(parents=True, exist_ok=True)
+
+    # Axes especially relevant for vertical position
+    condition_dependent_axes_y = [
+        "space_y_cue",
+        "saccade_space_y_plan",
+        "ipsi_hand_space_y_plan",
+        "contra_hand_space_y_plan",
+        "saccade_space_y_mov",
+        "ipsi_hand_space_y_mov",
+        "contra_hand_space_y_mov",
+        # optional context axes
         "cueCI",
         "planCI",
         "goCI",
         "movCI",
-    }
+        "hand",
+    ]
 
-    regressors_to_shuffle = [reg for reg in regressors if reg not in ci_regressors]
+    for axis in condition_dependent_axes_y:
+        if axis not in axis_names_y:
+            print(f"Skipping {axis}: not found in axis_names_y")
+            continue
 
-    df_shuf = shuffle_regressor_columns_within_unit(
-        df,
-        regressors_to_shuffle=regressors_to_shuffle,
-        unit_cols=("unit_ID",),
-        random_state=0,
-    )
-
-    # Fit TDR axes using shuffled regressors
-    axes_raw_shuf, axes_ortho_shuf, units_shuf, task_regressors_shuf = fit_tdr_axes(
-        df_shuf,
-        regressors=regressors,
-        rate_col="analysis_rate",
-        time_col="analysis_time",
-        unit_cols=("unit_ID",),
-    )
-
-    axis_names_shuf = list(task_regressors_shuf)
-
-    # Important:
-    # Build condition averages using the real df, not df_shuf.
-    # This keeps the real condition labels for plotting.
-    condition_pop_shuf = condition_mean_population(
-        df,
-        units_shuf,
-        condition_cols=("effector", "reach_hand", "target_hemifield"),
-        unit_cols=("unit_ID",),
-        rate_col="analysis_rate",
-    )
-
-    projections_shuf, axis_names_shuf = project_trajectories(
-        condition_pop_shuf,
-        axes_ortho_shuf,
-        task_regressors_shuf,
-    )
-
-    # ------------------------------------------------------------
-    # Plot the same axis time courses, but using shuffled TDR axes
-    # ------------------------------------------------------------
-    plot_all_tdr_axes_timecourses_separate(
-        projections_shuf,
-        analysis_time,
-        axis_names_shuf,
-        axes_to_plot=[
-            "hand",
-            "space_x_cue",
-            "space_y_cue",
-            "saccade_space_x_plan",
-            "saccade_space_y_plan",
-            "ipsi_hand_space_x_plan",
-            "ipsi_hand_space_y_plan",
-            "contra_hand_space_x_plan",
-            "contra_hand_space_y_plan",
-            "saccade_space_x_mov",
-            "saccade_space_y_mov",
-            "ipsi_hand_space_x_mov",
-            "ipsi_hand_space_y_mov",
-            "contra_hand_space_x_mov",
-            "contra_hand_space_y_mov",
-        ],
-        out_dir=shuffle_dir / "axis_timecourses",
-        event_times=event_times,
-        event_labels=event_labels,
-        event_linestyles=event_linestyles,
-        event_colors=event_colors,
-        event_linewidths=event_linewidths,
-        event_alphas=event_alphas,
-        lw=2.0,
-        downsample=2,
-    )
+        plot_tdr_axis_timecourse_with_sem(
+            projections_y_mean,
+            projections_y_sem,
+            analysis_time,
+            axis_names_y,
+            axis=axis,
+            cond_order=cond_order_8cond_y,
+            out_path=out_dir_y_test / f"test_time_{axis}_up_down_mean_sem.png",
+            downsample=5,
+            event_times=event_times,
+            event_labels=event_labels,
+            event_linestyles=event_linestyles,
+            event_colors=event_colors,
+            event_linewidths=event_linewidths,
+            event_alphas=event_alphas,
+        )
 
 
 if __name__ == "__main__":

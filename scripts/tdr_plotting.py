@@ -520,6 +520,7 @@ def plot_tdr_axis_timecourse(
     axis,
     cond_order=None,
     cond_label_fn=None,
+    cond_colors=None,
     event_times=None,
     event_labels=None,
     event_linestyles=None,
@@ -581,7 +582,9 @@ def plot_tdr_axis_timecourse(
 
         finite = np.isfinite(t) & np.isfinite(y)
 
-        if isinstance(cond, tuple) and len(cond) == 3:
+        if cond_colors is not None:
+            color = cond_colors.get(cond, fallback_colors[i])
+        elif isinstance(cond, tuple) and len(cond) == 3:
             color = CONDITION_COLORS.get(cond, fallback_colors[i])
         else:
             color = fallback_colors[i]
@@ -622,7 +625,7 @@ def plot_tdr_axis_timecourse(
         borderaxespad=0,
     )
 
-    fig.savefig(out_path, dpi=250, bbox_inches="tight")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
     return out_path
@@ -659,7 +662,7 @@ def plot_all_tdr_axes_timecourses_separate(
     out_paths = []
 
     for axis in axes_to_plot:
-        out_path = out_dir / f"tdr_time_{axis}.png"
+        out_path = out_dir / f"shuffled_{axis}.pdf"
 
         path = plot_tdr_axis_timecourse(
             projections,
@@ -1683,29 +1686,14 @@ def plot_target_position_axis_timecourse(
     event_colors=None,
     event_linewidths=None,
     event_alphas=None,
-    lw=2.0,
+    lw=2.5,
 ):
     """
     Plot condition-averaged trajectories for target positions on one TDR axis.
-
-    This makes one 2D timecourse plot:
-
-        x = time
-        y = projection on selected TDR axis
-
-    Each line is one target position.
-
-    Expected condition format:
-        cond = (target_x, target_y)
-
-    Color encodes physical 2D target position:
-        target_x controls red/blue balance
-        target_y controls green/brightness
     """
     from pathlib import Path
     import numpy as np
     import matplotlib.pyplot as plt
-    from matplotlib.colors import to_hex
 
     if axis not in axis_names:
         raise ValueError(f"{axis=} not found in axis_names={axis_names}")
@@ -1721,63 +1709,66 @@ def plot_target_position_axis_timecourse(
 
     conds = list(projections.keys()) if cond_order is None else list(cond_order)
 
-    # ------------------------------------------------------------
-    # Color each trajectory by physical target x/y
-    # ------------------------------------------------------------
     target_color = make_target_color_fn(conds)
 
-    # ------------------------------------------------------------
-    # Plot
-    # ------------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    # Bigger text only for this figure
+    with plt.rc_context(
+        {
+            "axes.titlesize": 20,
+            "axes.labelsize": 18,
+            "xtick.labelsize": 15,
+            "ytick.labelsize": 15,
+            "legend.fontsize": 12,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
 
-    for cond in conds:
-        target_x, target_y = cond
+        for cond in conds:
+            target_x, target_y = cond
 
-        Y = np.asarray(projections[cond], dtype=float)
-        y = np.asarray(Y[axis_idx, :], dtype=float)
+            Y = np.asarray(projections[cond], dtype=float)
+            y = np.asarray(Y[axis_idx, :], dtype=float)
 
-        finite = np.isfinite(t) & np.isfinite(y)
+            finite = np.isfinite(t) & np.isfinite(y)
 
-        color = target_color(cond)
-        label = f"x={target_x:.2f}, y={target_y:.2f}"
+            color = target_color(cond)
+            label = f"x={target_x:.2f}, y={target_y:.2f}"
 
-        ax.plot(
-            t[finite][::downsample],
-            y[finite][::downsample],
-            color=color,
-            lw=lw,
-            label=label,
+            ax.plot(
+                t[finite][::downsample],
+                y[finite][::downsample],
+                color=color,
+                lw=lw,
+                label=label,
+            )
+
+        add_vertical_event_lines(
+            ax,
+            event_times,
+            event_labels=event_labels,
+            event_linestyles=event_linestyles,
+            event_colors=event_colors,
+            event_linewidths=event_linewidths,
+            event_alphas=event_alphas,
         )
 
-    add_vertical_event_lines(
-        ax,
-        event_times,
-        event_labels=event_labels,
-        event_linestyles=event_linestyles,
-        event_colors=event_colors,
-        event_linewidths=event_linewidths,
-        event_alphas=event_alphas,
-    )
+        ax.axhline(0.0, color="0.75", lw=1.0)
 
-    ax.axhline(0.0, color="0.75", lw=0.8)
+        ax.set_title(f"Target-position trajectories on {axis}", pad=12)
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel(f"Projection on {axis}")
+        ax.grid(alpha=0.25)
 
-    ax.set_title(f"Target-position trajectories on {axis}")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel(f"Projection on {axis}")
-    ax.grid(alpha=0.25)
+        ax.legend(
+            frameon=False,
+            ncol=1,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0,
+        )
 
-    ax.legend(
-        frameon=False,
-        fontsize=7,
-        ncol=1,
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.0),
-        borderaxespad=0,
-    )
-
-    fig.savefig(out_path, dpi=250, bbox_inches="tight")
-    plt.close(fig)
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
     return out_path
 
@@ -2202,3 +2193,411 @@ def plot_three_action_movement_subspaces_3d(
         out_paths.append(out_path)
 
     return out_paths
+
+
+def plot_tdr_axis_timecourse_with_sem(
+    projections_mean,
+    projections_sem,
+    analysis_time,
+    axis_names,
+    *,
+    axis,
+    cond_order=None,
+    cond_label_fn=None,
+    event_times=None,
+    event_labels=None,
+    event_linestyles=None,
+    event_colors=None,
+    event_linewidths=None,
+    event_alphas=None,
+    lw=2.5,
+    alpha_sem=0.20,
+    downsample=5,
+    out_path=None,
+):
+    """
+    Plot mean ± SEM of held-out TDR projections across repeated train/test splits.
+    """
+    if axis not in axis_names:
+        raise ValueError(f"axis={axis!r} not found in axis_names={axis_names}")
+
+    if out_path is None:
+        out_path = Path(f"plots/train_test_split/tdr_time_{axis}_sem.png")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    t = np.asarray(analysis_time, dtype=float)
+    axis_idx = axis_names.index(axis)
+
+    conds = list(projections_mean.keys()) if cond_order is None else list(cond_order)
+
+    if cond_label_fn is None:
+
+        def cond_label_fn(cond):
+            if isinstance(cond, tuple) and len(cond) == 3:
+                effector, hand, target = cond
+                return f"{effector}, hand={hand}, target={target}"
+            return str(cond)
+
+    with plt.rc_context(
+        {
+            "axes.titlesize": 20,
+            "axes.labelsize": 18,
+            "xtick.labelsize": 15,
+            "ytick.labelsize": 15,
+            "legend.fontsize": 12,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
+
+        cmap = plt.get_cmap("tab20")
+        fallback_colors = [cmap(i) for i in np.linspace(0, 1, max(len(conds), 2))]
+
+        for i, cond in enumerate(conds):
+            if cond not in projections_mean:
+                continue
+
+            y = np.asarray(projections_mean[cond][axis_idx, :], dtype=float)
+            sem = np.asarray(projections_sem[cond][axis_idx, :], dtype=float)
+
+            finite = np.isfinite(t) & np.isfinite(y) & np.isfinite(sem)
+
+            if isinstance(cond, tuple) and len(cond) == 3:
+                color = CONDITION_COLORS.get(cond, fallback_colors[i])
+            else:
+                color = fallback_colors[i]
+
+            t_plot = t[finite][::downsample]
+            y_plot = y[finite][::downsample]
+            sem_plot = sem[finite][::downsample]
+
+            ax.plot(
+                t_plot,
+                y_plot,
+                color=color,
+                lw=lw,
+                label=cond_label_fn(cond),
+            )
+
+            ax.fill_between(
+                t_plot,
+                y_plot - sem_plot,
+                y_plot + sem_plot,
+                color=color,
+                alpha=alpha_sem,
+                linewidth=0,
+            )
+
+        add_vertical_event_lines(
+            ax,
+            event_times,
+            event_labels=event_labels,
+            event_linestyles=event_linestyles,
+            event_colors=event_colors,
+            event_linewidths=event_linewidths,
+            event_alphas=event_alphas,
+        )
+
+        ax.axhline(0.0, color="0.75", lw=1.0)
+
+        ax.set_title(f"Held-out projections on {axis} axis, mean ± SEM", pad=12)
+        ax.set_xlabel("Time relative to cue onset (s)")
+        ax.set_ylabel(f"Projection on {axis}")
+        ax.grid(alpha=0.25)
+
+        ax.legend(
+            frameon=False,
+            ncol=1,
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            borderaxespad=0,
+        )
+
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    return out_path
+
+
+def plot_tdr_axis_timecourse_with_bootstrap_ci(
+    projections_mean,
+    projections_lower,
+    projections_upper,
+    analysis_time,
+    axis_names,
+    *,
+    axis,
+    cond_order=None,
+    cond_label_fn=None,
+    event_times=None,
+    event_labels=None,
+    event_linestyles=None,
+    event_colors=None,
+    event_linewidths=None,
+    event_alphas=None,
+    lw=2.0,
+    alpha_ci=0.20,
+    downsample=5,
+    out_path=None,
+):
+    """
+    Plot held-out TDR projections with unit-bootstrap 95% CI.
+    """
+    if axis not in axis_names:
+        raise ValueError(f"axis={axis!r} not found in axis_names={axis_names}")
+
+    if out_path is None:
+        out_path = Path(f"plots/bootstrap_tdr_time_{axis}.png")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    t = np.asarray(analysis_time, dtype=float)
+    axis_idx = axis_names.index(axis)
+
+    conds = list(projections_mean.keys()) if cond_order is None else list(cond_order)
+
+    if cond_label_fn is None:
+
+        def cond_label_fn(cond):
+            if isinstance(cond, tuple) and len(cond) == 3:
+                effector, hand, target = cond
+                return f"{effector}, hand={hand}, target={target}"
+            return str(cond)
+
+    fig, ax = plt.subplots(figsize=(9, 5), constrained_layout=True)
+
+    cmap = plt.get_cmap("tab20")
+    fallback_colors = [cmap(i) for i in np.linspace(0, 1, max(len(conds), 2))]
+
+    for i, cond in enumerate(conds):
+        if cond not in projections_mean:
+            continue
+
+        y = np.asarray(projections_mean[cond][axis_idx, :], dtype=float)
+        lo = np.asarray(projections_lower[cond][axis_idx, :], dtype=float)
+        hi = np.asarray(projections_upper[cond][axis_idx, :], dtype=float)
+
+        finite = np.isfinite(t) & np.isfinite(y) & np.isfinite(lo) & np.isfinite(hi)
+
+        if isinstance(cond, tuple) and len(cond) == 3:
+            color = CONDITION_COLORS.get(cond, fallback_colors[i])
+        else:
+            color = fallback_colors[i]
+
+        t_plot = t[finite][::downsample]
+        y_plot = y[finite][::downsample]
+        lo_plot = lo[finite][::downsample]
+        hi_plot = hi[finite][::downsample]
+
+        ax.plot(
+            t_plot,
+            y_plot,
+            color=color,
+            lw=lw,
+            label=cond_label_fn(cond),
+        )
+
+        ax.fill_between(
+            t_plot,
+            lo_plot,
+            hi_plot,
+            color=color,
+            alpha=alpha_ci,
+            linewidth=0,
+        )
+
+    add_vertical_event_lines(
+        ax,
+        event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+    )
+
+    ax.axhline(0.0, color="0.75", lw=0.8)
+
+    ax.set_title(f"Held-out projections on {axis} axis, unit-bootstrap 95% CI")
+    ax.set_xlabel("Time relative to cue onset (s)")
+    ax.set_ylabel(f"Projection on {axis}")
+    ax.grid(alpha=0.25)
+
+    ax.legend(
+        frameon=False,
+        fontsize=7,
+        ncol=1,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0,
+    )
+
+    fig.savefig(out_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+
+    return out_path
+
+
+def plot_tdr_plan_vs_movement_2d(
+    projections_mean,
+    analysis_time,
+    axis_names,
+    *,
+    plan_axis,
+    mov_axis,
+    cond_order=None,
+    out_path,
+    downsample=5,
+    event_times=None,
+    event_labels=None,
+    title=None,
+):
+    """
+    Plot 2D TDR trajectories.
+
+    x-axis:
+        projection onto planning-period axis
+
+    y-axis:
+        projection onto movement-period axis
+
+    Each condition is one trajectory through time.
+    """
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if plan_axis not in axis_names:
+        raise ValueError(f"{plan_axis} not found in axis_names")
+
+    if mov_axis not in axis_names:
+        raise ValueError(f"{mov_axis} not found in axis_names")
+
+    plan_idx = axis_names.index(plan_axis)
+    mov_idx = axis_names.index(mov_axis)
+
+    t = np.asarray(analysis_time, dtype=float)
+
+    conds = list(projections_mean.keys()) if cond_order is None else list(cond_order)
+
+    fig, ax = plt.subplots(figsize=(7, 6), constrained_layout=True)
+
+    for cond in conds:
+        if cond not in projections_mean:
+            continue
+
+        Z = np.asarray(projections_mean[cond], dtype=float)
+
+        x = np.asarray(Z[plan_idx, :], dtype=float)
+        y = np.asarray(Z[mov_idx, :], dtype=float)
+
+        finite = np.isfinite(t) & np.isfinite(x) & np.isfinite(y)
+
+        x = x[finite]
+        y = y[finite]
+        tt = t[finite]
+
+        if len(x) == 0:
+            continue
+
+        x_plot = x[::downsample]
+        y_plot = y[::downsample]
+        t_plot = tt[::downsample]
+
+        if isinstance(cond, tuple) and len(cond) == 3:
+            effector, hand, target = cond
+            label = f"{effector}, hand={hand}, target={target}"
+            color = CONDITION_COLORS.get(cond, None)
+        else:
+            label = str(cond)
+            color = None
+
+        ax.plot(
+            x_plot,
+            y_plot,
+            color=color,
+            lw=2.0,
+            label=label,
+        )
+
+        # start marker
+        ax.scatter(
+            x_plot[0],
+            y_plot[0],
+            color=color,
+            s=35,
+            marker="o",
+            edgecolor="black",
+            linewidth=0.5,
+            zorder=3,
+        )
+
+        # end marker
+        ax.scatter(
+            x_plot[-1],
+            y_plot[-1],
+            color=color,
+            s=45,
+            marker="x",
+            linewidth=1.5,
+            zorder=3,
+        )
+
+        # Optional cue / GO markers on the trajectory
+        if event_times is not None:
+            if event_labels is None:
+                event_labels = [f"event {i}" for i in range(len(event_times))]
+
+            for event_time, event_label in zip(event_times, event_labels):
+                if event_time is None or not np.isfinite(event_time):
+                    continue
+
+                event_idx = np.nanargmin(np.abs(tt - event_time))
+
+                ax.scatter(
+                    x[event_idx],
+                    y[event_idx],
+                    color=color,
+                    s=55,
+                    marker="s",
+                    edgecolor="black",
+                    linewidth=0.6,
+                    zorder=4,
+                )
+
+                ax.text(
+                    x[event_idx],
+                    y[event_idx],
+                    f" {event_label}",
+                    fontsize=7,
+                    color="black",
+                    alpha=0.8,
+                )
+
+    ax.axhline(0.0, color="0.75", lw=0.8, zorder=0)
+    ax.axvline(0.0, color="0.75", lw=0.8, zorder=0)
+
+    ax.set_xlabel(f"Projection on {plan_axis}")
+    ax.set_ylabel(f"Projection on {mov_axis}")
+
+    if title is None:
+        title = f"2D trajectory: {plan_axis} vs {mov_axis}"
+
+    ax.set_title(title)
+    ax.grid(alpha=0.25)
+
+    ax.legend(
+        frameon=False,
+        fontsize=7,
+        ncol=1,
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0,
+    )
+
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return out_path
