@@ -29,6 +29,27 @@ def main(
     df = load_processed_trials(path=data_dir)
 
     # ------------------------------------------------------------
+    # Mean Centering
+    # ------------------------------------------------------------
+    df = mean_center_rates(
+        df,
+        unit_cols=("session", "unit_ID"),
+        rate_col="sdf_rate",
+    )
+
+    unit_info = pd.read_excel(
+        Path("data/unit_info.xlsx"),
+        usecols=[0],
+        dtype=str,
+        header=None,
+    )
+    allowed_unit_ids = set(unit_info.iloc[:, 0].dropna().str.strip())
+
+    df = df[df["unit_ID"].astype(str).str.strip().isin(allowed_unit_ids)].reset_index(
+        drop=True
+    )
+
+    # ------------------------------------------------------------
     # Get time of onset of CUE, MOV and GO
     # ------------------------------------------------------------
     cue_state = 6
@@ -349,9 +370,6 @@ def main(
         & df["analysis_time"].apply(is_valid_array)
     ].reset_index(drop=True)
 
-    # ------------------------------------------------------------
-    # Fit TDR axes
-    # ------------------------------------------------------------
     regressors = (
         # CI regressors
         "cueCI",
@@ -375,6 +393,35 @@ def main(
         "contra_hand_space_x_mov",
         "contra_hand_space_y_mov",
     )
+
+    condition_dependent_axes = [
+        "cueCI",
+        "planCI",
+        "goCI",
+        "movCI",
+        # Hand / cue-space axes
+        "hand",
+        "space_x_cue",
+        # Planning-period action-specific spatial axes
+        "saccade_space_x_plan",
+        "ipsi_hand_space_x_plan",
+        "contra_hand_space_x_plan",
+        # Movement-period action-specific spatial axes
+        "saccade_space_x_mov",
+        "ipsi_hand_space_x_mov",
+        "contra_hand_space_x_mov",
+        "space_y_cue",
+        "saccade_space_y_plan",
+        "ipsi_hand_space_y_plan",
+        "contra_hand_space_y_plan",
+        "saccade_space_y_mov",
+        "ipsi_hand_space_y_mov",
+        "contra_hand_space_y_mov",
+    ]
+
+    # ------------------------------------------------------------
+    # Fit TDR axes
+    # ------------------------------------------------------------
 
     axes_raw, axes_ortho, units, task_regressors = fit_tdr_axes(
         df,
@@ -609,6 +656,39 @@ def main(
     )
 
     axis_names = list(task_regressors)
+
+    # ------------------------------------------------------------
+    # Time-resolved variance explained by each TDR axis
+    # ------------------------------------------------------------
+    tdr_var_time = time_resolved_var_by_tdr_axes(
+        condition_pops_8cond,
+        axes_ortho,
+        axis_names,
+        analysis_time,
+        center_across_conditions=False,
+    )
+
+    tdr_var_time.to_csv(
+        plots_dir / "tdr_axis_variance_explained_8cond_time_resolved.csv",
+        index=False,
+    )
+
+    plot_tdr_axis_var_time_resolved(
+        tdr_var_time,
+        out_path=plots_dir / "tdr_axis_variance_explained_8cond.png",
+        title="TDR-axis variance explained over time (8 conditions)",
+        xlabel="Time relative to cue onset (s)",
+        ylabel="Fraction of total population activity",
+        y_col="variance_explained",
+        axis_order=condition_dependent_axes,
+        event_times=event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+        downsample=5,
+    )
 
     cond_order_8cond_vert = [
         ("reach", "ipsi", "up"),

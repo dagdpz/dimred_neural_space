@@ -14,7 +14,6 @@ from scripts.decoding_functions import *
 
 
 def main(
-    no_interaction=False,
     use_pca_denoising=False,
     plot=False,
     plots_dir=Path("plots/tdr_int_cue"),
@@ -192,8 +191,6 @@ def main(
         "analysis_rate",
         "analysis_time",
     ]
-    if not no_interaction:
-        drop_cols += ["EH", "ET"]
 
     df = df.dropna(subset=drop_cols).copy()
     df = df[
@@ -504,96 +501,95 @@ def main(
         x_label="Time (s)",
     )
 
-    if not no_interaction:
-        # [time, space, effector x space]
-        plot_tdr_time_y_z_3d(
-            projections,
-            analysis_time,
-            axis_names,
-            y_axis="T",
-            z_axis="ET",
-            y_label="Space",
-            z_label="Effector x Space",
-            out_path=plots_dir / "tdr_time_S_ES.html",
-            downsample=2,
-            event_times=event_times,
-            event_labels=event_labels,
-            event_colors=event_colors,
-            event_opacities=event_opacities,
-            x_label="Time (s)",
-        )
+    # [time, space, effector x space]
+    plot_tdr_time_y_z_3d(
+        projections,
+        analysis_time,
+        axis_names,
+        y_axis="T",
+        z_axis="ET",
+        y_label="Space",
+        z_label="Effector x Space",
+        out_path=plots_dir / "tdr_time_S_ES.html",
+        downsample=2,
+        event_times=event_times,
+        event_labels=event_labels,
+        event_colors=event_colors,
+        event_opacities=event_opacities,
+        x_label="Time (s)",
+    )
 
-        # [time, hand, effector x hand]
-        plot_tdr_time_y_z_3d(
-            projections,
-            analysis_time,
-            axis_names,
-            y_axis="H",
-            z_axis="EH",
-            y_label="Hand",
-            z_label="Effector x Hand",
-            out_path=plots_dir / "tdr_time_H_EH.html",
-            downsample=2,
-            event_times=event_times,
-            event_labels=event_labels,
-            event_colors=event_colors,
-            event_opacities=event_opacities,
-            x_label="Time (s)",
-        )
+    # [time, hand, effector x hand]
+    plot_tdr_time_y_z_3d(
+        projections,
+        analysis_time,
+        axis_names,
+        y_axis="H",
+        z_axis="EH",
+        y_label="Hand",
+        z_label="Effector x Hand",
+        out_path=plots_dir / "tdr_time_H_EH.html",
+        downsample=2,
+        event_times=event_times,
+        event_labels=event_labels,
+        event_colors=event_colors,
+        event_opacities=event_opacities,
+        x_label="Time (s)",
+    )
 
-        # [time, effector x space, effector x hand]
-        plot_tdr_time_y_z_3d(
-            projections,
-            analysis_time,
-            axis_names,
-            y_axis="ET",
-            z_axis="EH",
-            y_label="Effector x Space",
-            z_label="Effector x Hand",
-            out_path=plots_dir / "tdr_time_ES_EH.html",
-            downsample=2,
-            event_times=event_times,
-            event_labels=event_labels,
-            event_colors=event_colors,
-            event_opacities=event_opacities,
-            x_label="Time (s)",
-        )
+    # [time, effector x space, effector x hand]
+    plot_tdr_time_y_z_3d(
+        projections,
+        analysis_time,
+        axis_names,
+        y_axis="ET",
+        z_axis="EH",
+        y_label="Effector x Space",
+        z_label="Effector x Hand",
+        out_path=plots_dir / "tdr_time_ES_EH.html",
+        downsample=2,
+        event_times=event_times,
+        event_labels=event_labels,
+        event_colors=event_colors,
+        event_opacities=event_opacities,
+        x_label="Time (s)",
+    )
 
-        # [time, effector, effector x hand]
-        plot_tdr_time_y_z_3d(
-            projections,
-            analysis_time,
-            axis_names,
-            y_axis="E",
-            z_axis="EH",
-            y_label="Effector",
-            z_label="Effector x Hand",
-            out_path=plots_dir / "tdr_time_E_EH.html",
-            downsample=2,
-            event_times=event_times,
-            event_labels=event_labels,
-            event_colors=event_colors,
-            event_opacities=event_opacities,
-            x_label="Time (s)",
-        )
+    # [time, effector, effector x hand]
+    plot_tdr_time_y_z_3d(
+        projections,
+        analysis_time,
+        axis_names,
+        y_axis="E",
+        z_axis="EH",
+        y_label="Effector",
+        z_label="Effector x Hand",
+        out_path=plots_dir / "tdr_time_E_EH.html",
+        downsample=2,
+        event_times=event_times,
+        event_labels=event_labels,
+        event_colors=event_colors,
+        event_opacities=event_opacities,
+        x_label="Time (s)",
+    )
 
-        # [time, effector, effector x space]
-        plot_tdr_time_y_z_3d(
-            projections,
-            analysis_time,
-            axis_names,
-            y_axis="E",
-            z_axis="ET",
-            y_label="Effector",
-            z_label="Effector x Space",
-            out_path=plots_dir / "tdr_time_E_ES.html",
-            downsample=2,
-            event_times=event_times,
-            event_labels=event_labels,
-            event_colors=event_colors,
-            event_opacities=event_opacities,
-            x_label="Time (s)",
-        )
+    # [time, effector, effector x space]
+    plot_tdr_time_y_z_3d(
+        projections,
+        analysis_time,
+        axis_names,
+        y_axis="E",
+        z_axis="ET",
+        y_label="Effector",
+        z_label="Effector x Space",
+        out_path=plots_dir / "tdr_time_E_ES.html",
+        downsample=2,
+        event_times=event_times,
+        event_labels=event_labels,
+        event_colors=event_colors,
+        event_opacities=event_opacities,
+        x_label="Time (s)",
+    )
 
     # ------------------------------------------------------------
     # 2D projections of 8 condition-averaged trajectories
@@ -625,12 +621,6 @@ if __name__ == "__main__":
         help="Generate preprocessing plots.",
     )
     parser.add_argument(
-        "--no_interaction",
-        action="store_true",
-        default=False,
-        help="No interaction.",
-    )
-    parser.add_argument(
         "--use_pca_denoising",
         action="store_true",
         default=False,
@@ -639,12 +629,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--plots_dir",
         type=Path,
-        default=Path("plots/tdr_int_cue"),
+        default=Path("plots/TDR_CUE"),
         help="Directory where TDR output plots and CSV files are saved.",
     )
     args = parser.parse_args()
     main(
-        no_interaction=args.no_interaction,
         use_pca_denoising=args.use_pca_denoising,
         plot=args.plot,
         plots_dir=args.plots_dir,

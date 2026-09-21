@@ -14,6 +14,7 @@ from scripts.decoding_functions import *
 
 
 def main(
+    data_dir="data/new_data/flaffus",
     plot=False,
     plots_dir=Path("plots/tdr_int_go"),
 ):
@@ -23,7 +24,28 @@ def main(
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_processed_trials(normalized=True)
+    df = load_processed_trials(path=data_dir)
+
+    # ------------------------------------------------------------
+    # Mean Centering
+    # ------------------------------------------------------------
+    df = mean_center_rates(
+        df,
+        unit_cols=("session", "unit_ID"),
+        rate_col="sdf_rate",
+    )
+
+    unit_info = pd.read_excel(
+        Path("data/unit_info.xlsx"),
+        usecols=[0],
+        dtype=str,
+        header=None,
+    )
+    allowed_unit_ids = set(unit_info.iloc[:, 0].dropna().str.strip())
+
+    df = df[df["unit_ID"].astype(str).str.strip().isin(allowed_unit_ids)].reset_index(
+        drop=True
+    )
 
     # ------------------------------------------------------------
     # Get time of onset of MOV
@@ -292,6 +314,12 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--data_dir",
+        type=str,
+        default="data/new_data/flaffus",
+        help="Folder containing new-format population_*.mat and trials_*.mat files.",
+    )
+    parser.add_argument(
         "--plot",
         action="store_true",
         default=False,
@@ -305,6 +333,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(
+        data_dir=args.data_dir,
         plot=args.plot,
         plots_dir=args.plots_dir,
     )

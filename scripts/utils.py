@@ -226,3 +226,35 @@ def mean_rate_from_series(series_list):
 def safe_filename_part(s):
     """Replace characters unsafe in file names with underscores; keeps alphanumerics, hyphen, underscore."""
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(s))
+
+
+def mean_center_rates(
+    df,
+    *,
+    unit_cols=("session", "unit_ID"),
+    rate_col="sdf_rate",
+):
+    """
+    Subtract each unit's global mean from all its rate arrays.
+
+    The mean is calculated across all trials and all stored time bins
+    belonging to that unit.
+    """
+    df = df.copy()
+
+    unit_means = df.groupby(list(unit_cols))[rate_col].apply(
+        lambda rates: np.nanmean(
+            np.concatenate([np.asarray(rate, dtype=float) for rate in rates])
+        )
+    )
+
+    df[rate_col] = [
+        np.asarray(rate, dtype=float) - unit_means.loc[(session, unit_id)]
+        for rate, session, unit_id in zip(
+            df[rate_col],
+            df["session"],
+            df["unit_ID"],
+        )
+    ]
+
+    return df

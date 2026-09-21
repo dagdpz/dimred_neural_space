@@ -27,6 +27,27 @@ def main(
     df = load_processed_trials(path=data_dir)
 
     # ------------------------------------------------------------
+    # Mean Centering
+    # ------------------------------------------------------------
+    df = mean_center_rates(
+        df,
+        unit_cols=("session", "unit_ID"),
+        rate_col="sdf_rate",
+    )
+
+    unit_info = pd.read_excel(
+        Path("data/unit_info.xlsx"),
+        usecols=[0],
+        dtype=str,
+        header=None,
+    )
+    allowed_unit_ids = set(unit_info.iloc[:, 0].dropna().str.strip())
+
+    df = df[df["unit_ID"].astype(str).str.strip().isin(allowed_unit_ids)].reset_index(
+        drop=True
+    )
+
+    # ------------------------------------------------------------
     # Align spikes to cue and movement
     # ------------------------------------------------------------
     cue_state = 6

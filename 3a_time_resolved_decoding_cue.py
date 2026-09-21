@@ -23,7 +23,28 @@ def main(
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_processed_trials(path=Path("data/old_data/processed_trials.pkl"))
+    df = load_processed_trials(path=Path("data/new_data/flaffus"))
+
+    unit_info = pd.read_excel(
+        Path("data/unit_info.xlsx"),
+        usecols=[0],
+        dtype=str,
+        header=None,
+    )
+    allowed_unit_ids = set(unit_info.iloc[:, 0].dropna().str.strip())
+
+    df = df[df["unit_ID"].astype(str).str.strip().isin(allowed_unit_ids)].reset_index(
+        drop=True
+    )
+
+    # ------------------------------------------------------------
+    # Mean Centering
+    # ------------------------------------------------------------
+    df = mean_center_rates(
+        df,
+        unit_cols=("session", "unit_ID"),
+        rate_col="sdf_rate",
+    )
 
     # ------------------------------------------------------------
     # Get time of onset of CUE, MOV and GO
@@ -89,9 +110,10 @@ def main(
         & df["analysis_time"].apply(is_valid_array)
     ].reset_index(drop=True)
     after = len(df)
+    n_units = df[["session", "unit_ID"]].drop_duplicates().shape[0]
     print(f"Removed {before - after} rows with NaNs in SDFs")
     print(f"Remaining rows: {after}")
-    analysis_time = np.asarray(df["analysis_time"].iloc[0], dtype=float)
+    print(f"Remaining units: {n_units}")
 
     trials_per_condition = count_rows_per_unit_condition(df)
     trials_per_condition.to_csv(
@@ -100,7 +122,7 @@ def main(
     )
 
     # ------------------------------------------------------------
-    # Keep only units with at least one trial in every condition
+    # Keep only units with at least x trials in every condition
     # ------------------------------------------------------------
     complete_units = (
         trials_per_condition.groupby(["session", "unit_ID"])["n_rows"]
@@ -108,9 +130,10 @@ def main(
         .reset_index()
     )
 
-    complete_units = complete_units[complete_units["n_rows"] > 0][
+    complete_units = complete_units[complete_units["n_rows"] >= 1][
         ["session", "unit_ID"]
     ]
+    # Fla_20160622_11: saccade,ipsi_hand,ipsi_target is missing
 
     print(
         f"Units before complete-condition filtering: {df[['session', 'unit_ID']].drop_duplicates().shape[0]}"

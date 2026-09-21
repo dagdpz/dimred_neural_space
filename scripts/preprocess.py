@@ -586,8 +586,7 @@ def zscore_rates(
 def build_processed_trials(
     data_dir=Path("data/new_data/flaffus"),
     *,
-    use_old_data=False,
-    old_data_dir=Path("data/old_data"),
+    using_old_data=False,
     sqrt_transform=True,
     zscore=False,
     min_mean_rate=1.0,
@@ -617,16 +616,15 @@ def build_processed_trials(
         7. Optionally apply per-unit z-scoring.
     """
     data_dir = Path(data_dir)
-    old_data_dir = Path(old_data_dir)
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------
     # Old-format data path
     # ------------------------------------------------------------
-    if use_old_data:
+    if using_old_data:
         return build_processed_trials_old(
-            data_dir=old_data_dir,
+            data_dir=Path("data/old_data"),
             sqrt_transform=sqrt_transform,
             zscore=zscore,
             min_mean_rate=min_mean_rate,
@@ -732,8 +730,7 @@ def build_processed_trials(
         time_col="sdf_time",
         rate_col="sdf_rate",
         bin_size=bin_size,
-        sigma=0.05,
-        # sigma=sigma,
+        sigma=sigma,
     )
 
     # ------------------------------------------------------------

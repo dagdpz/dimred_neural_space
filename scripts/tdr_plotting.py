@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import matplotlib.pyplot as plt
 from itertools import product
+from matplotlib.colors import to_hex
+from matplotlib.lines import Line2D
 
 from scripts.plotting import *
 
@@ -1773,28 +1775,37 @@ def plot_target_position_axis_timecourse(
     return out_path
 
 
-from matplotlib.colors import to_hex
-
-
-def make_target_color_fn(conds, *, min_brightness=0.35, max_brightness=1.00):
+def make_target_color_fn(
+    conds,
+    *,
+    min_lightening=0.20,
+    max_lightening=0.80,
+):
     """
-    Color target positions with:
-        x-position: blue -> red gradient
-        y-position: brightness
+    Colour target positions using:
+
+        x-position: blue -> purple -> red
+        y-position: lighter shades for higher y
 
     cond format:
         (target_x, target_y)
     """
-    target_xs = np.asarray([cond[0] for cond in conds], dtype=float)
-    target_ys = np.asarray([cond[1] for cond in conds], dtype=float)
+    target_xs = np.asarray(
+        [cond[0] for cond in conds],
+        dtype=float,
+    )
+    target_ys = np.asarray(
+        [cond[1] for cond in conds],
+        dtype=float,
+    )
 
     x_min, x_max = np.nanmin(target_xs), np.nanmax(target_xs)
     y_min, y_max = np.nanmin(target_ys), np.nanmax(target_ys)
 
-    def norm(v, vmin, vmax):
-        if vmax == vmin:
+    def norm(value, value_min, value_max):
+        if value_max == value_min:
             return 0.5
-        return (v - vmin) / (vmax - vmin)
+        return (value - value_min) / (value_max - value_min)
 
     def color_fn(cond):
         target_x, target_y = cond
@@ -1802,19 +1813,23 @@ def make_target_color_fn(conds, *, min_brightness=0.35, max_brightness=1.00):
         x01 = norm(float(target_x), x_min, x_max)
         y01 = norm(float(target_y), y_min, y_max)
 
-        # x controls hue: blue -> red
-        base_r = x01
-        base_g = 0.0
-        base_b = 1.0 - x01
+        # Horizontal position controls hue:
+        # blue -> purple -> red
+        base_color = np.array(
+            [
+                x01,  # red
+                0.10,  # small green component prevents very dark purple
+                1.0 - x01,  # blue
+            ]
+        )
 
-        # y controls brightness
-        brightness = min_brightness + y01 * (max_brightness - min_brightness)
+        # Vertical position controls how strongly the colour is
+        # blended toward white.
+        lightening = max_lightening - y01 * (max_lightening - min_lightening)
 
-        r = brightness * base_r
-        g = brightness * base_g
-        b = brightness * base_b
+        color = (1.0 - lightening) * base_color + lightening * np.ones(3)
 
-        return to_hex((r, g, b))
+        return to_hex(color)
 
     return color_fn
 
@@ -2598,6 +2613,234 @@ def plot_tdr_plan_vs_movement_2d(
     )
 
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    return out_path
+
+
+def plot_tdr_grid(
+    projections,
+    row_axes,
+    analysis_time,
+    axis_names,
+    *,
+    out_path,
+    event_times=None,
+    event_labels=None,
+    event_linestyles=None,
+    event_colors=None,
+    event_linewidths=None,
+    event_alphas=None,
+    downsample=5,
+    lw=1.8,
+):
+    """Plot target trajectories on one or more requested TDR axes.
+
+    Each entry in ``row_axes`` produces one subplot row.
+    Columns represent effector types.
+
+    Rows are those subspace axes.
+    Columns are each effector type.
+    Every line represents one (space_x, space_y) target position.
+
+    ``projections`` must map ``(effector, space_x, space_y)`` to arrays with
+    shape ``n_axes x n_time``.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    row_axes = tuple(row_axes)
+    if not row_axes:
+        raise ValueError("row_axes must contain at least one axis.")
+
+    effectors = ("saccade", "contra_hand", "ipsi_hand")
+    effector_labels = {
+        "saccade": "Saccade",
+        "contra_hand": "Contra-hand reach",
+        "ipsi_hand": "Ipsi-hand reach",
+    }
+
+    missing_axes = [axis for axis in row_axes if axis not in axis_names]
+    if missing_axes:
+        raise ValueError(
+            f"Missing requested TDR axes: {missing_axes}. "
+            f"Available axes: {list(axis_names)}"
+        )
+
+    t = np.asarray(analysis_time, dtype=float)
+    if downsample < 1:
+        raise ValueError("downsample must be at least 1.")
+
+    # Re-index the (effector, x, y) dictionary for simple panel selection.
+    by_effector = {effector: {} for effector in effectors}
+    for condition, trajectory in projections.items():
+        if not isinstance(condition, tuple) or len(condition) != 3:
+            raise ValueError(
+                "Projection keys must have the form " "(action, space_x, space_y)."
+            )
+        effector, target_x, target_y = condition
+        if effector in by_effector:
+            by_effector[effector][(target_x, target_y)] = np.asarray(
+                trajectory, dtype=float
+            )
+
+    target_positions = sorted(
+        {
+            target_position
+            for effector_projections in by_effector.values()
+            for target_position in effector_projections
+        }
+    )
+    if not target_positions:
+        raise ValueError("No target-position trajectories were found.")
+
+    missing_conditions = [
+        (effector, *target_position)
+        for effector in effectors
+        for target_position in target_positions
+        if target_position not in by_effector[effector]
+    ]
+    if missing_conditions:
+        raise ValueError(
+            "The effector-by-target grid is incomplete. Missing conditions "
+            f"include: {missing_conditions[:6]}"
+        )
+
+    nonfinite_conditions = [
+        (effector, *target_position)
+        for effector in effectors
+        for target_position, trajectory in by_effector[effector].items()
+        if not np.isfinite(trajectory).all()
+    ]
+    if nonfinite_conditions:
+        raise ValueError(
+            "Some projected trajectories contain NaNs or infinities, usually "
+            "because at least one retained unit lacks trials in that "
+            "effector-target condition. Conditions include: "
+            f"{nonfinite_conditions[:6]}"
+        )
+
+    # The same target has the same colour in every subplot.
+    target_color = make_target_color_fn(target_positions)
+    event_parameters = (
+        event_labels,
+        event_linestyles,
+        event_colors,
+        event_linewidths,
+        event_alphas,
+    )
+
+    n_rows = len(row_axes)
+    legend_ncols = min(6, len(target_positions))
+    legend_nrows = int(np.ceil(len(target_positions) / legend_ncols))
+    fig_height = 3.0 * n_rows + 0.65 * legend_nrows + 0.8
+
+    fig, axs = plt.subplots(
+        n_rows,
+        3,
+        figsize=(12, 4 * n_rows),
+        sharex=True,
+        sharey="row",
+        constrained_layout=False,
+        squeeze=False,
+    )
+
+    for row, axis_name in enumerate(row_axes):
+        axis_idx = axis_names.index(axis_name)
+        for col, effector in enumerate(effectors):
+            ax = axs[row, col]
+            for target_position in target_positions:
+                trajectory = by_effector[effector].get(target_position)
+                if trajectory is None:
+                    continue
+                if trajectory.ndim != 2 or trajectory.shape[0] != len(axis_names):
+                    raise ValueError(
+                        f"Condition {(effector, *target_position)} has shape "
+                        f"{trajectory.shape}; expected "
+                        f"({len(axis_names)}, {t.size})."
+                    )
+                if trajectory.shape[1] != t.size:
+                    raise ValueError(
+                        f"Condition {(effector, *target_position)} has "
+                        f"{trajectory.shape[1]} time points but analysis_time "
+                        f"has {t.size}."
+                    )
+
+                y = trajectory[axis_idx]
+                finite = np.isfinite(t) & np.isfinite(y)
+                if not finite.any():
+                    continue
+                ax.plot(
+                    t[finite][::downsample],
+                    y[finite][::downsample],
+                    color=target_color(target_position),
+                    lw=lw,
+                )
+
+            for event_time, _, linestyle, color, linewidth, alpha in zip(
+                event_times or [],
+                event_labels,
+                event_linestyles,
+                event_colors,
+                event_linewidths,
+                event_alphas,
+            ):
+                ax.axvline(
+                    event_time,
+                    color=color,
+                    ls=linestyle,
+                    lw=linewidth,
+                    alpha=alpha,
+                )
+
+            ax.axhline(0.0, color="0.75", lw=0.8)
+            ax.grid(alpha=0.2)
+            if row == 0:
+                ax.set_title(effector_labels[effector])
+            if col == 0:
+                ax.set_ylabel(f"Projection on {axis_name}")
+
+    target_handles = [
+        Line2D(
+            [0],
+            [0],
+            color=target_color(target_position),
+            lw=lw,
+            label=f"x={target_position[0]:.2f}, y={target_position[1]:.2f}",
+        )
+        for target_position in target_positions
+    ]
+    fig.legend(
+        handles=target_handles,
+        title="Target position",
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.03),
+        ncol=legend_ncols,
+        frameon=False,
+    )
+    fig.suptitle(
+        "Target trajectories on TDR axes",
+        y=0.99,
+    )
+    # Reserve space at the bottom for the figure legend
+    legend_bottom = 0.05 + 0.045 * legend_nrows
+    fig.tight_layout(
+        rect=(
+            0.02,  # left
+            legend_bottom,  # bottom
+            0.98,  # right
+            0.96,  # top
+        ),
+        h_pad=1.2,
+        w_pad=1.0,
+    )
+
+    fig.savefig(
+        out_path,
+        dpi=250,
+        bbox_inches="tight",
+        pad_inches=0.15,
+    )
     plt.close(fig)
 
     return out_path

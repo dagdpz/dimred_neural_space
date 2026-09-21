@@ -78,12 +78,63 @@ def add_condition_independent_regressors(df):
             continue
 
         cueCI.append(((t >= t_cue + 0.05) & (t < t_cue + 0.2)).astype(float))
-        planCI.append(((t >= t_cue + 0.2) & (t < t_go)).astype(float))
+        planCI.append(((t >= t_cue + 0.2) & (t < t_go + 0.05)).astype(float))
         goCI.append(((t >= t_go + 0.05) & (t < t_go + 0.2)).astype(float))
         movCI.append(((t >= t_mov) & (t < t_mov + 0.3)).astype(float))
 
     df["cueCI"] = cueCI
     df["planCI"] = planCI
+    df["goCI"] = goCI
+    df["movCI"] = movCI
+
+    return df
+
+
+def add_condition_independent_regressors_mov(df):
+    """
+    Add condition-independent, time-dependent regressors.
+
+    Each new regressor is stored as a 1D array with the same length as
+    `analysis_time`.
+    """
+    time_col = "analysis_time"
+
+    df = df.copy()
+
+    if len(df) == 0:
+        raise ValueError("Cannot add CI regressors to an empty dataframe.")
+
+    required_cols = [
+        time_col,
+        "t_go",
+        "t_mov",
+    ]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+
+    goCI = []
+    movCI = []
+
+    for _, row in df.iterrows():
+        t = np.asarray(row[time_col], dtype=float)
+
+        if t.ndim != 1 or t.size == 0 or not np.all(np.isfinite(t)):
+            goCI.append(np.full(0, np.nan))
+            movCI.append(np.full(0, np.nan))
+            continue
+
+        t_mov = float(row["t_mov"])
+        t_go = float(row["t_go"])
+
+        if not np.isfinite(t_mov):
+            goCI.append(np.zeros_like(t, dtype=float))
+            movCI.append(np.zeros_like(t, dtype=float))
+            continue
+
+        goCI.append(((t >= t_go + 0.05) & (t < t_go + 0.2)).astype(float))
+        movCI.append(((t >= t_mov) & (t < t_mov + 0.3)).astype(float))
+
     df["goCI"] = goCI
     df["movCI"] = movCI
 
@@ -173,6 +224,43 @@ def add_effector_masks(
         eff_mov_mask.append(((t >= t_mov) & (t < t_mov_end)).astype(float))
 
     df["eff_plan_mask"] = eff_plan_mask
+    df["eff_mov_mask"] = eff_mov_mask
+
+    return df
+
+
+def add_effector_masks_mov(
+    df,
+    *,
+    time_col="analysis_time",
+):
+    """
+    Add masks used only for effector/action regressors.
+    """
+    df = df.copy()
+
+    required_cols = [time_col, "t_mov", "t_mov_end"]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    eff_mov_mask = []
+
+    for _, row in df.iterrows():
+        t = np.asarray(row[time_col], dtype=float)
+
+        if t.ndim != 1 or t.size == 0 or not np.all(np.isfinite(t)):
+            eff_mov_mask.append(np.full(0, np.nan))
+            continue
+
+        t_mov = float(row["t_mov"])
+        t_mov_end = float(row["t_mov_end"])
+        if not np.all(np.isfinite([t_mov, t_mov_end])):
+            eff_mov_mask.append(np.zeros_like(t, dtype=float))
+            continue
+
+        eff_mov_mask.append(((t >= t_mov) & (t < t_mov_end)).astype(float))
+
     df["eff_mov_mask"] = eff_mov_mask
 
     return df
@@ -600,7 +688,7 @@ def time_resolved_var_by_tdr_axes(
     axis_names,
     time,
     *,
-    center_across_conditions=False,
+    center_across_conditions=True,
 ):
     """
     Time-resolved variance explained by each TDR axis.

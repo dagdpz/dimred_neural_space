@@ -61,6 +61,7 @@ def build_pseudopopulation_from_pools(
         for _ in range(n_pseudotrials_per_class):
             pseudo = []
 
+            # For each unit randomly select one trial
             for unit in units:
                 rates = pools[(unit, label)]
                 idx = rng.integers(0, rates.shape[0])
@@ -288,7 +289,6 @@ def time_resolved_logistic_decoding(
             X_test_t = X_test[:, :, t_idx]
 
             clf = make_pipeline(
-                StandardScaler(),
                 LogisticRegression(
                     l1_ratio=0,
                     C=C,
@@ -517,7 +517,6 @@ def temporal_generalization_logistic_decoding(
         for i_train, train_t_idx in enumerate(time_indices):
             X_train_t = X_train[:, :, train_t_idx]
             clf = make_pipeline(
-                StandardScaler(),
                 LogisticRegression(
                     C=C,
                     solver="liblinear",
