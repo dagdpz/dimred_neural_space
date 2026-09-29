@@ -11,13 +11,13 @@ from scripts.state_space_functions import *
 from scripts.tdr_functions import *
 from scripts.tdr_plotting import *
 from scripts.decoding_functions import *
+import scripts.config as cfg
 
 
 def main(
     data_dir="data/new_data/flaffus",
-    use_pca_denoising=False,
     plot=False,
-    plots_dir=Path("plots/epoched_tdr_cue"),
+    plots_dir=Path("plots/TDR_CUE"),
 ):
     """
     Load preprocessed trials, align spikes to cue, compute SDFs, then run TDR.
@@ -26,7 +26,7 @@ def main(
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_processed_trials(path=data_dir)
+    df = load_processed_trials(path=data_dir, filename="processed_trials.pkl")
 
     # ------------------------------------------------------------
     # Mean Centering
@@ -36,6 +36,10 @@ def main(
         unit_cols=("session", "unit_ID"),
         rate_col="sdf_rate",
     )
+
+    # ------------------------------------------------------------
+    # Unit Filtering
+    # ------------------------------------------------------------
 
     unit_info = pd.read_excel(
         Path("data/unit_info.xlsx"),
@@ -95,97 +99,52 @@ def main(
     # Align other event times to cue
     # ------------------------------------------------------------
     df["t_mov"] = df["t_mov"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
-
     df["t_mov_end"] = df["t_mov_end"].to_numpy(dtype=float) - df["t_cue"].to_numpy(
         dtype=float
     )
-
     df["t_go"] = df["t_go"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
-
     df["t_cue"] = 0.0
 
     # ------------------------------------------------------------
     # Remove rows with NaNs in cue or movement SDFs
     # ------------------------------------------------------------
-    before = len(df)
     df = df[
         df["analysis_rate"].apply(is_valid_array)
         & df["analysis_time"].apply(is_valid_array)
     ].reset_index(drop=True)
-    after = len(df)
-    print(f"Removed {before - after} rows with NaNs in SDFs")
-    print(f"Remaining rows: {after}")
     analysis_time = np.asarray(df["analysis_time"].iloc[0], dtype=float)
-
-    trials_per_effector = count_rows_per_unit_condition(
-        df,
-        unit_cols=("unit_ID",),
-        condition_cols=("effector",),
-    )
 
     # ------------------------------------------------------------
     # Keep only units with enough trials in every 8-condition cell
     # effector x reach_hand x target_hemifield
     # ------------------------------------------------------------
     min_trials_per_condition = 5
-    # You can increase this later, e.g. 5 or 10, if you want stricter averaging.
-
     condition_cols_8cond = ("effector", "reach_hand", "target_hemifield")
     condition_levels_8cond = {
         "effector": ["reach", "saccade"],
         "reach_hand": ["ipsi", "contra"],
         "target_hemifield": ["ipsi", "contra"],
     }
-
     trials_per_8cond = count_rows_per_unit_condition(
         df,
         unit_cols=("unit_ID",),
         condition_cols=condition_cols_8cond,
         condition_levels=condition_levels_8cond,
     )
+    trials_per_8cond.to_csv(
+        plots_dir / "rows_per_unit_per_8condition.csv",
+        index=False,
+    )
 
     good_units = trials_per_8cond.groupby("unit_ID")["n_rows"].min().reset_index()
-
     good_units = good_units[good_units["n_rows"] >= min_trials_per_condition][
         ["unit_ID"]
     ]
-
-    n_units_before = df["unit_ID"].nunique()
-
     df = df.merge(
         good_units,
         on="unit_ID",
         how="inner",
     ).reset_index(drop=True)
-
-    n_units_after = df["unit_ID"].nunique()
-
-    print(f"Units before 8-condition filtering: {n_units_before}")
-    print(
-        f"Units after requiring >= {min_trials_per_condition} trial(s) "
-        f"in every effector x hand x target condition: {n_units_after}"
-    )
-    print(f"Rows after unit filtering: {len(df)}")
-
-    # ------------------------------------------------------------
-    # Summary after all filtering
-    # ------------------------------------------------------------
-    n_units = df[["unit_ID"]].drop_duplicates().shape[0]
-    n_trials_total = len(df)
-
-    trials_per_unit = df.groupby("unit_ID").size().rename("n_trials").reset_index()
-
-    mean_trials_per_unit = trials_per_unit["n_trials"].mean()
-    sd_trials_per_unit = trials_per_unit["n_trials"].std(ddof=1)
-
-    print("\nAfter analysis-rate filtering:")
-    print(f"  Units: {n_units}")
-    print(f"  Rows / unit-trials: {n_trials_total}")
-    print("\nTrials per unit:")
-    print(f"  Mean: {mean_trials_per_unit:.2f}")
-    print(f"  SD:   {sd_trials_per_unit:.2f}")
-    print(f"  Min:  {trials_per_unit['n_trials'].min()}")
-    print(f"  Max:  {trials_per_unit['n_trials'].max()}")
 
     # ------------------------------------------------------------
     # Common event markers for plots
@@ -224,8 +183,70 @@ def main(
     # Regressors
     # ------------------------------------------------------------
 
-    # Condition-independent regressors
-    df = add_condition_independent_regressors(df)
+    def time_window(time, start_time, end_time):
+        time = np.asarray(time, dtype=float)
+
+        if not np.all(np.isfinite([start_time, end_time])):
+            return np.zeros_like(time, dtype=float)
+
+        return ((time >= start_time) & (time < end_time)).astype(float)
+
+    # Cue CI
+    df["cueCI"] = df.apply(
+        lambda row: time_window(
+            row["analysis_time"],
+            start_time=row["t_cue"] + 0.05,
+            end_time=row["t_cue"] + 0.20,
+        ),
+        axis=1,
+    )
+
+    # Planning CI
+    df["planCI"] = df.apply(
+        lambda row: time_window(
+            row["analysis_time"],
+            start_time=row["t_cue"] + 0.20,
+            end_time=row["t_go"] + 0.05,
+        ),
+        axis=1,
+    )
+
+    # Movement CI
+    saccade_ci_window = (0.0, 0.10)
+    reach_ci_window = (0.0, 0.30)
+
+    def make_effector_movement_ci(row, effector, window):
+        time = np.asarray(row["analysis_time"], dtype=float)
+
+        # The regressor is zero for the other effector
+        if row["effector"] != effector:
+            return np.zeros_like(time, dtype=float)
+
+        start_offset, end_offset = window
+
+        return time_window(
+            time,
+            start_time=row["t_mov"] + start_offset,
+            end_time=row["t_mov"] + end_offset,
+        )
+
+    df["sacCI"] = df.apply(
+        lambda row: make_effector_movement_ci(
+            row,
+            effector="saccade",
+            window=saccade_ci_window,
+        ),
+        axis=1,
+    )
+
+    df["reaCI"] = df.apply(
+        lambda row: make_effector_movement_ci(
+            row,
+            effector="reach",
+            window=reach_ci_window,
+        ),
+        axis=1,
+    )
 
     # ------------------------------------------------------------
     # Hand Regressor
@@ -257,29 +278,29 @@ def main(
         .reset_index(name="n_rows")
         .sort_values(["space_x", "space_y"])
     )
-
-    print("\nUnique target positions:")
-    print(target_counts)
-    print(f"\nNumber of unique target positions: {len(target_counts)}")
+    target_counts.to_csv(
+        plots_dir / "target_position_counts.csv",
+        index=False,
+    )
 
     # ------------------------------------------------------------
-    # Effector/action regressors
+    # Effector regressors
     # ------------------------------------------------------------
     df = add_effector_regressors(df)
 
     df = add_effector_masks(df)
 
-    action_regs = ("saccade", "ipsi_hand", "contra_hand")
+    effector_regs = ("saccade", "ipsi_hand", "contra_hand")
     space_regs = ("space_x", "space_y")
     regs = []
 
-    for action in action_regs:
+    for effector in effector_regs:
         for space in space_regs:
-            col = f"{action}_{space}"
-            df[col] = df[action] * df[space]
+            col = f"{effector}_{space}"
+            df[col] = df[effector] * df[space]
             regs.append(col)
 
-    # Planning action regressors
+    # Planning effector regressors
     df = mask_regressors(
         df,
         regressors=regs,
@@ -287,7 +308,7 @@ def main(
         suffix="_plan",
     )
 
-    # Movement action regressors
+    # Movement effector regressors
     df = mask_regressors(
         df,
         regressors=regs,
@@ -307,8 +328,8 @@ def main(
         # CI regressors
         "cueCI",
         "planCI",
-        "goCI",
-        "movCI",
+        "sacCI",
+        "reaCI",
         # Regressors
         "hand",
         "space_x_cue",
@@ -333,15 +354,12 @@ def main(
         & df["analysis_time"].apply(is_valid_array)
     ].reset_index(drop=True)
 
-    # ------------------------------------------------------------
-    # Fit TDR axes
-    # ------------------------------------------------------------
     regressors = (
         # CI regressors
         "cueCI",
         "planCI",
-        "goCI",
-        "movCI",
+        "sacCI",
+        "reaCI",
         # Regressors
         "hand",
         "space_x_cue",
@@ -360,8 +378,98 @@ def main(
         "contra_hand_space_y_mov",
     )
 
-    axes_raw, axes_ortho, units, task_regressors = fit_tdr_axes(
+    df["effector"] = np.where(
+        df["effector"].eq("saccade"),
+        "saccade",
+        df["reach_hand"].map(
+            {
+                "ipsi": "ipsi_hand",
+                "contra": "contra_hand",
+            }
+        ),
+    )
+
+    # ------------------------------------------------------------
+    # Keep units with enough trials in every effector-target condition
+    # ------------------------------------------------------------
+    min_trials_per_condition = 5
+    trajectory_condition_cols = [
+        "effector",
+        "space_x",
+        "space_y",
+    ]
+    valid_conditions = (
+        df[trajectory_condition_cols].dropna().drop_duplicates().reset_index(drop=True)
+    )
+    required_counts = (
+        df[["unit_ID"]].drop_duplicates().merge(valid_conditions, how="cross")
+    )
+    observed_counts = (
+        df.groupby(
+            ["unit_ID", *trajectory_condition_cols],
+            observed=True,
+        )
+        .size()
+        .rename("n_rows")
+        .reset_index()
+    )
+    trials_per_target_condition = required_counts.merge(
+        observed_counts,
+        on=["unit_ID", *trajectory_condition_cols],
+        how="left",
+    )
+    trials_per_target_condition["n_rows"] = (
+        trials_per_target_condition["n_rows"].fillna(0).astype(int)
+    )
+    trials_per_target_condition.to_csv(
+        plots_dir / "rows_per_unit_per_effector_target.csv",
+        index=False,
+    )
+
+    good_units = (
+        trials_per_target_condition.groupby("unit_ID")["n_rows"]
+        .min()
+        .loc[lambda counts: counts >= min_trials_per_condition]
+        .index
+    )
+    print(f"Units before effector-target filtering: " f"{df['unit_ID'].nunique()}")
+    print(f"Units after effector-target filtering: " f"{len(good_units)}")
+    df = df[df["unit_ID"].isin(good_units)].reset_index(drop=True)
+
+    # ------------------------------------------------------------
+    # Balance target conditions within each unit by oversampling
+    # ------------------------------------------------------------
+    # Each unit is balanced independently. For a given unit, smaller
+    # effector x target-position cells are sampled with replacement until
+    # they equal that unit's largest cell.
+    tdr_df = oversample_trials_within_unit_condition(
         df,
+        unit_cols=("unit_ID",),
+        condition_cols=tuple(trajectory_condition_cols),
+        random_state=0,
+    )
+
+    balanced_counts = (
+        tdr_df.groupby(
+            ["unit_ID", *trajectory_condition_cols],
+            observed=True,
+        )
+        .size()
+        .rename("n_rows")
+        .reset_index()
+    )
+    balanced_counts.to_csv(
+        plots_dir / "rows_per_unit_per_effector_target_oversampled.csv",
+        index=False,
+    )
+    print(f"Rows before oversampling: {len(df)}")
+    print(f"Rows after oversampling:  {len(tdr_df)}")
+
+    # ------------------------------------------------------------
+    # Fit TDR axes
+    # ------------------------------------------------------------
+    axes_raw, axes_ortho, units, task_regressors = fit_tdr_axes(
+        tdr_df,
         regressors=regressors,
         rate_col="analysis_rate",
         time_col="analysis_time",
@@ -375,163 +483,204 @@ def main(
         task_regressors,
         units=units,
     )
-
     beta_unit_stats.to_csv(
         plots_dir / "tdr_beta_effect_sizes_by_unit.csv",
         index=False,
     )
-
     beta_summary.to_csv(
         plots_dir / "tdr_beta_effect_size_summary.csv",
         index=False,
     )
-
     beta_axis_summary.to_csv(
         plots_dir / "tdr_beta_axis_strength_summary.csv",
         index=False,
     )
 
-    print("\nTDR beta effect-size summary:")
-    print(beta_summary)
-
-    print("\nTDR raw axis strength:")
-    print(beta_axis_summary)
-
     # ------------------------------------------------------------
-    # Condition-averaged trajectories + projections
+    # Condition-averaged trajectories
     # ------------------------------------------------------------
-    condition_pops_target_pos = condition_mean_population(
+
+    condition_trajectories = condition_mean_population(
         df,
-        units,
-        condition_cols=("space_x", "space_y"),
-        unit_cols=("unit_ID",),  # use ("session", "unit_ID") if you keep session
+        units,  # From TDR function
+        condition_cols=("effector", "space_x", "space_y"),
+        unit_cols=("unit_ID",),
         rate_col="analysis_rate",
     )
-
-    projections_target_pos, _ = project_trajectories(
-        condition_pops_target_pos,
+    trajectory_projections, _ = project_trajectories(
+        condition_trajectories,
         axes_ortho,
         task_regressors,
     )
     axis_names = list(task_regressors)
-    cond_order = sorted(projections_target_pos.keys())
+    cond_order = sorted(trajectory_projections.keys())
 
-    plot_target_position_axis_timecourse(
-        projections_target_pos,
+    # ------------------------------------------------------------
+    # Common event markers for plots
+    # ------------------------------------------------------------
+    event_times = [
+        0.0,
+        np.nanmedian(df["t_go"]),
+    ]
+    event_labels = ["Cue", "GO"]
+    event_colors = ["black", "black"]
+    event_opacities = [0.04, 0.04]
+    event_linestyles = ["--", ":"]
+    event_linewidths = [1.2, 1.2]
+    event_alphas = [0.7, 0.8]
+
+    # ------------------------------------------------------------
+    # Plot with 6 subplots
+    # ------------------------------------------------------------
+
+    downsample = 3
+    row_axes = ("saccade_space_x_plan", "saccade_space_y_plan")
+    plot_tdr_grid(
+        trajectory_projections,
+        row_axes,
         analysis_time,
         axis_names,
-        axis="space_x_cue",
-        cond_order=cond_order,
-        out_path=plots_dir / "target_position_x_cue.png",
-        downsample=5,
+        out_path=plots_dir / "saccade_planning_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
         event_linestyles=event_linestyles,
         event_colors=event_colors,
         event_linewidths=event_linewidths,
         event_alphas=event_alphas,
+        downsample=downsample,
     )
 
-    plot_target_position_axis_timecourse(
-        projections_target_pos,
+    row_axes = ("ipsi_hand_space_x_plan", "ipsi_hand_space_y_plan")
+    plot_tdr_grid(
+        trajectory_projections,
+        row_axes,
         analysis_time,
         axis_names,
-        axis="space_y_cue",
-        cond_order=cond_order,
-        out_path=plots_dir / "target_position_y_cue.png",
-        downsample=5,
+        out_path=plots_dir / "ipsi_hand_planning_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
         event_linestyles=event_linestyles,
         event_colors=event_colors,
         event_linewidths=event_linewidths,
         event_alphas=event_alphas,
+        downsample=downsample,
     )
 
-    # ------------------------------------------------------------
-    # Shuffled TDR control: same plots with shuffled task regressors
-    # ------------------------------------------------------------
+    row_axes = ("contra_hand_space_x_plan", "contra_hand_space_y_plan")
+    plot_tdr_grid(
+        trajectory_projections,
+        row_axes,
+        analysis_time,
+        axis_names,
+        out_path=plots_dir / "contra_hand_planning_axes_by_effector.png",
+        event_times=event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+        downsample=downsample,
+    )
 
-    shuffle_dir = plots_dir / "shuffled_tdr"
-    shuffle_dir.mkdir(parents=True, exist_ok=True)
+    row_axes = ("saccade_space_x_mov", "saccade_space_y_mov")
+    plot_tdr_grid(
+        trajectory_projections,
+        row_axes,
+        analysis_time,
+        axis_names,
+        out_path=plots_dir / "saccade_movement_axes_by_effector.png",
+        event_times=event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+        downsample=downsample,
+    )
 
-    ci_regressors = {
+    row_axes = ("ipsi_hand_space_x_mov", "ipsi_hand_space_y_mov")
+    plot_tdr_grid(
+        trajectory_projections,
+        row_axes,
+        analysis_time,
+        axis_names,
+        out_path=plots_dir / "ipsi_hand_movement_axes_by_effector.png",
+        event_times=event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+        downsample=downsample,
+    )
+
+    row_axes = ("contra_hand_space_x_mov", "contra_hand_space_y_mov")
+    plot_tdr_grid(
+        trajectory_projections,
+        row_axes,
+        analysis_time,
+        axis_names,
+        out_path=plots_dir / "contra_hand_movement_axes_by_effector.png",
+        event_times=event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+        downsample=downsample,
+    )
+
+    row_axes = ("space_x_cue", "space_y_cue")
+    plot_tdr_grid(
+        trajectory_projections,
+        row_axes,
+        analysis_time,
+        axis_names,
+        out_path=plots_dir / "space_cue_axes_by_effector.png",
+        event_times=event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+        downsample=downsample,
+    )
+
+    row_axes = (
         "cueCI",
         "planCI",
-        "goCI",
-        "movCI",
-    }
-
-    regressors_to_shuffle = [reg for reg in regressors if reg not in ci_regressors]
-
-    df_shuf = shuffle_regressor_columns_within_unit(
-        df,
-        regressors_to_shuffle=regressors_to_shuffle,
-        unit_cols=("unit_ID",),
-        random_state=0,
+        "sacCI",
+        "reaCI",
     )
-
-    # Fit TDR axes using shuffled regressors
-    axes_raw_shuf, axes_ortho_shuf, units_shuf, task_regressors_shuf = fit_tdr_axes(
-        df_shuf,
-        regressors=regressors,
-        rate_col="analysis_rate",
-        time_col="analysis_time",
-        unit_cols=("unit_ID",),
-    )
-
-    axis_names_shuf = list(task_regressors_shuf)
-
-    # Important:
-    # Build condition averages using the real df, not df_shuf.
-    # This keeps the real condition labels for plotting.
-    condition_pop_shuf = condition_mean_population(
-        df,
-        units_shuf,
-        condition_cols=("effector", "reach_hand", "target_hemifield"),
-        unit_cols=("unit_ID",),
-        rate_col="analysis_rate",
-    )
-
-    projections_shuf, axis_names_shuf = project_trajectories(
-        condition_pop_shuf,
-        axes_ortho_shuf,
-        task_regressors_shuf,
-    )
-
-    # ------------------------------------------------------------
-    # Plot the same axis time courses, but using shuffled TDR axes
-    # ------------------------------------------------------------
-    plot_all_tdr_axes_timecourses_separate(
-        projections_shuf,
+    plot_tdr_grid(
+        trajectory_projections,
+        row_axes,
         analysis_time,
-        axis_names_shuf,
-        axes_to_plot=[
-            "hand",
-            "space_x_cue",
-            "space_y_cue",
-            "saccade_space_x_plan",
-            "saccade_space_y_plan",
-            "ipsi_hand_space_x_plan",
-            "ipsi_hand_space_y_plan",
-            "contra_hand_space_x_plan",
-            "contra_hand_space_y_plan",
-            "saccade_space_x_mov",
-            "saccade_space_y_mov",
-            "ipsi_hand_space_x_mov",
-            "ipsi_hand_space_y_mov",
-            "contra_hand_space_x_mov",
-            "contra_hand_space_y_mov",
-        ],
-        out_dir=shuffle_dir / "axis_timecourses",
+        axis_names,
+        out_path=plots_dir / "CI_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
         event_linestyles=event_linestyles,
         event_colors=event_colors,
         event_linewidths=event_linewidths,
         event_alphas=event_alphas,
-        lw=2.0,
-        downsample=2,
+        downsample=downsample,
+    )
+
+    row_axes = ("hand",)
+    plot_tdr_grid(
+        trajectory_projections,
+        row_axes,
+        analysis_time,
+        axis_names,
+        out_path=plots_dir / "hand_axes_by_effector.png",
+        event_times=event_times,
+        event_labels=event_labels,
+        event_linestyles=event_linestyles,
+        event_colors=event_colors,
+        event_linewidths=event_linewidths,
+        event_alphas=event_alphas,
+        downsample=downsample,
     )
 
 
@@ -550,21 +699,14 @@ if __name__ == "__main__":
         help="Generate preprocessing plots.",
     )
     parser.add_argument(
-        "--use_pca_denoising",
-        action="store_true",
-        default=False,
-        help="PCA Denoising.",
-    )
-    parser.add_argument(
         "--plots_dir",
         type=Path,
-        default=Path("plots/epoched_tdr_cue"),
+        default=Path("plots/TDR_CUE_NOGO_SEPMOV"),
         help="Directory where TDR output plots and CSV files are saved.",
     )
     args = parser.parse_args()
     main(
         data_dir=args.data_dir,
-        use_pca_denoising=args.use_pca_denoising,
         plot=args.plot,
         plots_dir=args.plots_dir,
     )

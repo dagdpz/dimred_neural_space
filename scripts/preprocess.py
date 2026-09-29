@@ -416,7 +416,6 @@ def process_labels_and_filter(df):
 
     # Decode effector and remove joint saccade-reach trials
     df["effector"] = df["effector"].apply(decode_effector_label)
-    df = df[df["effector"].isin(["reach", "saccade"])].copy()
 
     # Convert target position to ipsi/contra hemifield
     target_side = df["tar_pos"].apply(tar_pos_to_side)
@@ -583,11 +582,60 @@ def zscore_rates(
     return df.loc[good_indices].reset_index(drop=True)
 
 
+def poisson_scale_rates(
+    df,
+    *,
+    unit_cols=("session", "unit_ID"),
+    rate_col="sdf_rate",
+    eps=1e-8,
+):
+    """
+    Scale firing-rate arrays by the Poisson-predicted SD of each unit.
+
+    For unit ``i``:
+
+        scaled_rate = rate / sqrt(mean_rate_i)
+
+    ``mean_rate_i`` is calculated over every finite time bin from every trial
+    belonging to that unit. Unlike ``sqrt(rate)``, this is a linear rescaling
+    within a unit and therefore preserves the shape of its rate trajectory.
+    """
+    df = df.copy()
+
+    missing_cols = [col for col in [*unit_cols, rate_col] if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+
+    scaled_groups = []
+    unit_grouper = unit_cols[0] if len(unit_cols) == 1 else list(unit_cols)
+
+    for unit, unit_df in df.groupby(unit_grouper, sort=False, observed=True):
+        rates = np.concatenate(unit_df[rate_col].to_numpy()).astype(float)
+        mean_rate = np.nanmean(rates)
+
+        if not np.isfinite(mean_rate) or mean_rate <= eps:
+            raise ValueError(
+                f"Cannot Poisson-scale unit {unit!r}: mean rate is {mean_rate}."
+            )
+
+        scale = np.sqrt(mean_rate)
+        unit_df = unit_df.copy()
+        unit_df[rate_col] = unit_df[rate_col].apply(
+            lambda rate: np.asarray(rate, dtype=float) / scale
+        )
+        scaled_groups.append(unit_df)
+
+    if not scaled_groups:
+        return df
+
+    return pd.concat(scaled_groups).sort_index().reset_index(drop=True)
+
+
 def build_processed_trials(
     data_dir=Path("data/new_data/flaffus"),
     *,
     using_old_data=False,
-    sqrt_transform=True,
+    transform="sqrt",
     zscore=False,
     min_mean_rate=1.0,
     bin_size=0.001,
@@ -625,7 +673,7 @@ def build_processed_trials(
     if using_old_data:
         return build_processed_trials_old(
             data_dir=Path("data/old_data"),
-            sqrt_transform=sqrt_transform,
+            sqrt_transform=transform,
             zscore=zscore,
             min_mean_rate=min_mean_rate,
             bin_size=bin_size,
@@ -699,15 +747,14 @@ def build_processed_trials(
     print(f"  SD:   {sd_trials:.2f}")
 
     # ------------------------------------------------------------
-    # Optional trial-count diagnostic before filtering
+    # Trial-count diagnostic before filtering
     # ------------------------------------------------------------
-    if plot:
-        plot_trial_counts(
-            df,
-            unit_cols=("session", "unit_ID"),
-            plots_dir=plots_dir,
-            filename="trial_counts.png",
-        )
+    plot_trial_counts(
+        df,
+        unit_cols=("session", "unit_ID"),
+        plots_dir=plots_dir,
+        filename="trial_counts.png",
+    )
 
     # ------------------------------------------------------------
     # Process labels and filter behavioral trials
@@ -799,9 +846,50 @@ def build_processed_trials(
     print(f"  Units: {df[['session', 'unit_ID']].drop_duplicates().shape[0]}")
 
     # ------------------------------------------------------------
-    # Optional sqrt transform
+    # Optional unit-wise Poisson scaling
     # ------------------------------------------------------------
-    if sqrt_transform:
+    if transform == "poisson_scale":
+
+        raw_rates_before_scaling = df["sdf_rate"].copy()
+
+        df = poisson_scale_rates(
+            df,
+            unit_cols=("session", "unit_ID"),
+            rate_col="sdf_rate",
+        )
+
+        scaled_rates_after = df["sdf_rate"].copy()
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
+
+        raw_vals = np.concatenate(raw_rates_before_scaling.to_numpy()).astype(float)
+        scaled_vals = np.concatenate(scaled_rates_after.to_numpy()).astype(float)
+
+        raw_vals = raw_vals[np.isfinite(raw_vals)]
+        scaled_vals = scaled_vals[np.isfinite(scaled_vals)]
+
+        axes[0].hist(raw_vals, bins=100, edgecolor="black", alpha=0.75)
+        axes[0].set_title("Before Poisson scaling")
+        axes[0].set_xlabel("Firing rate (Hz)")
+        axes[0].set_ylabel("Count")
+        axes[0].grid(alpha=0.3)
+
+        axes[1].hist(scaled_vals, bins=100, edgecolor="black", alpha=0.75)
+        axes[1].set_title("After Poisson scaling")
+        axes[1].set_xlabel("Firing rate / sqrt(unit mean rate)")
+        axes[1].set_ylabel("Count")
+        axes[1].grid(alpha=0.3)
+
+        fig.suptitle("Firing-rate distributions before and after Poisson scaling")
+
+        fig.savefig(
+            plots_dir / "rate_distribution_before_after_poisson_scaling.pdf",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+    elif transform == "sqrt":
 
         raw_rates_before_sqrt = df["sdf_rate"].copy()
 
@@ -812,35 +900,34 @@ def build_processed_trials(
 
         sqrt_rates_after = df["sdf_rate"].copy()
 
-        if plot:
-            fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
 
-            raw_vals = np.concatenate(raw_rates_before_sqrt.to_numpy()).astype(float)
-            sqrt_vals = np.concatenate(sqrt_rates_after.to_numpy()).astype(float)
+        raw_vals = np.concatenate(raw_rates_before_sqrt.to_numpy()).astype(float)
+        sqrt_vals = np.concatenate(sqrt_rates_after.to_numpy()).astype(float)
 
-            raw_vals = raw_vals[np.isfinite(raw_vals)]
-            sqrt_vals = sqrt_vals[np.isfinite(sqrt_vals)]
+        raw_vals = raw_vals[np.isfinite(raw_vals)]
+        sqrt_vals = sqrt_vals[np.isfinite(sqrt_vals)]
 
-            axes[0].hist(raw_vals, bins=100, edgecolor="black", alpha=0.75)
-            axes[0].set_title("Before sqrt transform")
-            axes[0].set_xlabel("Firing rate (Hz)")
-            axes[0].set_ylabel("Count")
-            axes[0].grid(alpha=0.3)
+        axes[0].hist(raw_vals, bins=100, edgecolor="black", alpha=0.75)
+        axes[0].set_title("Before sqrt transform")
+        axes[0].set_xlabel("Firing rate (Hz)")
+        axes[0].set_ylabel("Count")
+        axes[0].grid(alpha=0.3)
 
-            axes[1].hist(sqrt_vals, bins=100, edgecolor="black", alpha=0.75)
-            axes[1].set_title("After sqrt transform")
-            axes[1].set_xlabel("sqrt(firing rate)")
-            axes[1].set_ylabel("Count")
-            axes[1].grid(alpha=0.3)
+        axes[1].hist(sqrt_vals, bins=100, edgecolor="black", alpha=0.75)
+        axes[1].set_title("After sqrt transform")
+        axes[1].set_xlabel("sqrt(firing rate)")
+        axes[1].set_ylabel("Count")
+        axes[1].grid(alpha=0.3)
 
-            fig.suptitle("Firing-rate distributions before and after sqrt transform")
+        fig.suptitle("Firing-rate distributions before and after sqrt transform")
 
-            fig.savefig(
-                plots_dir / "rate_distribution_before_after_sqrt.pdf",
-                dpi=300,
-                bbox_inches="tight",
-            )
-            plt.close(fig)
+        fig.savefig(
+            plots_dir / "rate_distribution_before_after_sqrt.pdf",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
 
     # ------------------------------------------------------------
     # Optional per-unit z-scoring
@@ -855,7 +942,6 @@ def build_processed_trials(
     print("\nFinal processed data:")
     print(f"  Rows: {len(df)}")
     print(f"  Units: {df['unit_ID'].drop_duplicates().shape[0]}")
-    print(f"  sqrt_transform: {sqrt_transform}")
     print(f"  zscore: {zscore}")
     print(df.columns)
 
@@ -866,15 +952,15 @@ def save_processed_trials(
     df,
     *,
     path=Path("data/new_data/flaffus"),
+    filename="processed_trials.pkl",
 ):
     """
     Save processed trials to disk.
 
     Example:
         processed_trials.pkl
-        processed_trials_normalized.pkl
     """
-    path = Path(path) / "processed_trials.pkl"
+    path = Path(path) / filename
     df.to_pickle(path, compression="gzip")
     print(f"Wrote {len(df)} rows to {path}")
     return path
@@ -883,6 +969,7 @@ def save_processed_trials(
 def load_processed_trials(
     *,
     path=PROCESSED_TRIALS_PATH,
+    filename="processed_trials.pkl",
 ):
     """
     Load processed trials from disk.
@@ -890,7 +977,7 @@ def load_processed_trials(
     Loads:
         processed_trials.pkl
     """
-    path = Path(path) / "processed_trials.pkl"
+    path = Path(path) / filename
 
     if not path.exists():
         raise FileNotFoundError(f"Missing {path}. Run `python 0_preprocess.py` first.")

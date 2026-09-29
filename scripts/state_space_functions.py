@@ -99,47 +99,135 @@ def stitch_time(
 def condition_mean_population(
     df,
     units,
+    condition_cols,
     *,
-    condition_cols=("effector", "reach_hand", "target_hemifield"),
-    unit_cols=("unit_ID",),
+    unit_col="unit_ID",
     rate_col="analysis_rate",
 ):
     """
-    Builds condition-averaged pseudo-population trajectories.
+    Build condition-averaged pseudopopulation trajectories.
 
-    For each condition:
-        1. average trials within each unit
-        2. stack units into a population matrix
+    For every condition:
+        1. Average trials separately for each unit.
+        2. Stack unit averages in the order given by `units`.
 
-    Output:
-        dict mapping condition tuple -> array of shape n_units x n_time
+    Parameters
+    ----------
+    df : pd.DataFrame
+        One row per unit-trial observation.
+
+    units : sequence
+        Scalar unit IDs. Their order determines the row order of every
+        returned population matrix.
+
+    condition_cols : sequence of str
+        Columns defining a condition.
+
+    unit_col : str
+        Column containing unit identifiers.
+
+    rate_col : str
+        Column containing one rate array per row.
+
+    Returns
+    -------
+    condition_population : dict
+        Maps condition tuples to arrays with shape n_units x n_time.
     """
-    out = {}
-    df = df.dropna(subset=list(condition_cols) + [rate_col]).copy()
-    grouped = df.groupby(list(condition_cols), sort=True)
+    condition_cols = list(condition_cols)
 
-    # Get time length from first valid stitched_rate
-    example_rate = np.asarray(df[rate_col].iloc[0], dtype=float)
+    required_cols = [
+        unit_col,
+        *condition_cols,
+        rate_col,
+    ]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+
+    df = df.dropna(
+        subset=[
+            unit_col,
+            *condition_cols,
+            rate_col,
+        ]
+    ).copy()
+
+    if df.empty:
+        raise ValueError(
+            "No valid rows remain for building " "condition-mean trajectories."
+        )
+
+    units = list(units)
+
+    if not units:
+        raise ValueError("The units list is empty.")
+
+    example_rate = np.asarray(
+        df[rate_col].iloc[0],
+        dtype=float,
+    )
+
+    if example_rate.ndim != 1:
+        raise ValueError(f"{rate_col!r} must contain one-dimensional arrays.")
+
     n_time = example_rate.size
+    condition_population = {}
 
-    for cond, cond_df in grouped:
-        pop = []
-        for unit in units:
-            unit_df = cond_df.copy()
-            for col, val in zip(unit_cols, unit):
-                unit_df = unit_df[unit_df[col] == val]
+    grouped_conditions = df.groupby(
+        condition_cols,
+        sort=True,
+        observed=True,
+    )
 
-            # If this unit has no trials in this condition,
-            # fill with NaNs instead of crashing.
-            if len(unit_df) == 0:
-                pop.append(np.full(n_time, np.nan))
-                continue
+    for condition, condition_df in grouped_conditions:
+        # Keep dictionary keys consistently represented as tuples.
+        if not isinstance(condition, tuple):
+            condition = (condition,)
+
+        unit_means = {}
+
+        for unit, unit_df in condition_df.groupby(
+            unit_col,
+            sort=False,
+            observed=True,
+        ):
             rates = np.stack(unit_df[rate_col].to_numpy()).astype(float)
 
-            # Mean across trials for this unit-condition
-            pop.append(np.nanmean(rates, axis=0))
-        out[cond] = np.stack(pop, axis=0)
-    return out
+            if rates.ndim != 2 or rates.shape[1] != n_time:
+                raise ValueError(
+                    f"Unit {unit!r}, condition {condition!r}: "
+                    f"rates have shape {rates.shape}; expected "
+                    f"n_trials x {n_time}."
+                )
+
+            unit_means[unit] = np.nanmean(
+                rates,
+                axis=0,
+            )
+
+        population = []
+
+        for unit in units:
+            if unit in unit_means:
+                population.append(unit_means[unit])
+            else:
+                # Maintain the requested unit order even when a
+                # unit-condition combination is absent.
+                population.append(
+                    np.full(
+                        n_time,
+                        np.nan,
+                        dtype=float,
+                    )
+                )
+
+        condition_population[condition] = np.stack(
+            population,
+            axis=0,
+        )
+
+    return condition_population
 
 
 def count_rows_per_unit_condition(

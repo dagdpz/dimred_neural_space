@@ -231,7 +231,7 @@ def safe_filename_part(s):
 def mean_center_rates(
     df,
     *,
-    unit_cols=("session", "unit_ID"),
+    unit_col="unit_ID",
     rate_col="sdf_rate",
 ):
     """
@@ -242,17 +242,16 @@ def mean_center_rates(
     """
     df = df.copy()
 
-    unit_means = df.groupby(list(unit_cols))[rate_col].apply(
+    unit_means = df.groupby(unit_col)[rate_col].apply(
         lambda rates: np.nanmean(
             np.concatenate([np.asarray(rate, dtype=float) for rate in rates])
         )
     )
 
     df[rate_col] = [
-        np.asarray(rate, dtype=float) - unit_means.loc[(session, unit_id)]
-        for rate, session, unit_id in zip(
+        np.asarray(rate, dtype=float) - unit_means.loc[unit_id]
+        for rate, unit_id in zip(
             df[rate_col],
-            df["session"],
             df["unit_ID"],
         )
     ]

@@ -2623,8 +2623,11 @@ def plot_tdr_grid(
     row_axes,
     analysis_time,
     axis_names,
-    *,
     out_path,
+    *,
+    projections_sem=None,
+    effectors=None,
+    effector_labels=None,
     event_times=None,
     event_labels=None,
     event_linestyles=None,
@@ -2633,6 +2636,7 @@ def plot_tdr_grid(
     event_alphas=None,
     downsample=5,
     lw=1.8,
+    sem_alpha=0.14,
 ):
     """Plot target trajectories on one or more requested TDR axes.
 
@@ -2653,11 +2657,32 @@ def plot_tdr_grid(
     if not row_axes:
         raise ValueError("row_axes must contain at least one axis.")
 
-    effectors = ("saccade", "contra_hand", "ipsi_hand")
-    effector_labels = {
+    if effectors is None:
+        effectors = (
+            "saccade",
+            "contra_hand",
+            "ipsi_hand",
+        )
+    else:
+        effectors = tuple(effectors)
+
+    default_effector_labels = {
         "saccade": "Saccade",
         "contra_hand": "Contra-hand reach",
         "ipsi_hand": "Ipsi-hand reach",
+        "saccade_reach_contra_hand": "Combined: contra-hand",
+        "saccade_reach_ipsi_hand": "Combined: ipsi-hand",
+    }
+
+    if effector_labels is None:
+        effector_labels = {}
+
+    effector_labels = {
+        effector: effector_labels.get(
+            effector,
+            default_effector_labels.get(effector, effector),
+        )
+        for effector in effectors
     }
 
     missing_axes = [axis for axis in row_axes if axis not in axis_names]
@@ -2670,6 +2695,8 @@ def plot_tdr_grid(
     t = np.asarray(analysis_time, dtype=float)
     if downsample < 1:
         raise ValueError("downsample must be at least 1.")
+    if not 0.0 <= sem_alpha <= 1.0:
+        raise ValueError("sem_alpha must lie between 0 and 1.")
 
     # Re-index the (effector, x, y) dictionary for simple panel selection.
     by_effector = {effector: {} for effector in effectors}
@@ -2720,25 +2747,29 @@ def plot_tdr_grid(
             f"{nonfinite_conditions[:6]}"
         )
 
+    if projections_sem is not None:
+        missing_sem = [
+            condition for condition in projections if condition not in projections_sem
+        ]
+        if missing_sem:
+            raise ValueError(
+                "SEM projections are missing conditions including: "
+                f"{missing_sem[:6]}"
+            )
+
     # The same target has the same colour in every subplot.
     target_color = make_target_color_fn(target_positions)
-    event_parameters = (
-        event_labels,
-        event_linestyles,
-        event_colors,
-        event_linewidths,
-        event_alphas,
-    )
 
     n_rows = len(row_axes)
+    n_cols = len(effectors)
     legend_ncols = min(6, len(target_positions))
     legend_nrows = int(np.ceil(len(target_positions) / legend_ncols))
     fig_height = 3.0 * n_rows + 0.65 * legend_nrows + 0.8
 
     fig, axs = plt.subplots(
         n_rows,
-        3,
-        figsize=(12, 4 * n_rows),
+        n_cols,
+        figsize=(4 * n_cols, 4 * n_rows),
         sharex=True,
         sharey="row",
         constrained_layout=False,
@@ -2770,10 +2801,37 @@ def plot_tdr_grid(
                 finite = np.isfinite(t) & np.isfinite(y)
                 if not finite.any():
                     continue
+                color = target_color(target_position)
+
+                if projections_sem is not None:
+                    condition = (effector, *target_position)
+                    sem_trajectory = np.asarray(
+                        projections_sem[condition],
+                        dtype=float,
+                    )
+                    if sem_trajectory.shape != trajectory.shape:
+                        raise ValueError(
+                            f"SEM for condition {condition} has shape "
+                            f"{sem_trajectory.shape}; expected {trajectory.shape}."
+                        )
+                    sem = sem_trajectory[axis_idx]
+                    finite_sem = finite & np.isfinite(sem) & (sem >= 0.0)
+                    if finite_sem.any():
+                        t_sem = t[finite_sem][::downsample]
+                        y_sem = y[finite_sem][::downsample]
+                        sem_plot = sem[finite_sem][::downsample]
+                        ax.fill_between(
+                            t_sem,
+                            y_sem - sem_plot,
+                            y_sem + sem_plot,
+                            color=color,
+                            alpha=sem_alpha,
+                            linewidth=0,
+                        )
                 ax.plot(
                     t[finite][::downsample],
                     y[finite][::downsample],
-                    color=target_color(target_position),
+                    color=color,
                     lw=lw,
                 )
 
@@ -2844,3 +2902,144 @@ def plot_tdr_grid(
     plt.close(fig)
 
     return out_path
+
+
+def plot_condition_mean_variance_grid(
+    variance_summary,
+    *,
+    out_path,
+    event_times=None,
+    event_linestyles=None,
+    downsample=3,
+):
+    """Plot observed, TDR-reconstructed and residual variance per condition."""
+    required = {
+        "effector",
+        "space_x",
+        "space_y",
+        "time",
+        "observed_variance",
+        "reconstructed_variance",
+        "residual_variance",
+    }
+    missing = required.difference(variance_summary.columns)
+    if missing:
+        raise ValueError(f"variance_summary is missing columns: {sorted(missing)}")
+    if downsample < 1:
+        raise ValueError("downsample must be at least 1.")
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    effector_preference = ["saccade", "contra_hand", "ipsi_hand"]
+    available_effectors = list(variance_summary["effector"].drop_duplicates())
+    effectors = [e for e in effector_preference if e in available_effectors]
+    effectors.extend(e for e in available_effectors if e not in effectors)
+
+    targets = (
+        variance_summary[["space_x", "space_y"]]
+        .drop_duplicates()
+        .sort_values(["space_y", "space_x"], ascending=[False, True])
+        .itertuples(index=False, name=None)
+    )
+    targets = list(targets)
+
+    if not effectors or not targets:
+        raise ValueError("No conditions are available for variance plotting.")
+
+    fig, axes = plt.subplots(
+        len(targets),
+        len(effectors),
+        figsize=(4.6 * len(effectors), 2.45 * len(targets)),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
+        constrained_layout=False,
+    )
+
+    curve_specs = (
+        ("observed_variance", "Observed", "black", "-"),
+        ("reconstructed_variance", "TDR reconstruction", "#0072B2", "-"),
+        ("residual_variance", "Residual", "#D55E00", "--"),
+    )
+
+    event_times = [] if event_times is None else list(event_times)
+    if event_linestyles is None:
+        event_linestyles = [":"] * len(event_times)
+
+    for row_idx, (space_x, space_y) in enumerate(targets):
+        for col_idx, effector in enumerate(effectors):
+            ax = axes[row_idx, col_idx]
+            subset = variance_summary[
+                variance_summary["effector"].eq(effector)
+                & np.isclose(variance_summary["space_x"], space_x)
+                & np.isclose(variance_summary["space_y"], space_y)
+            ].sort_values("time")
+
+            if subset.empty:
+                ax.set_visible(False)
+                continue
+
+            subset = subset.iloc[::downsample]
+            for column, label, color, linestyle in curve_specs:
+                ax.plot(
+                    subset["time"],
+                    subset[column],
+                    color=color,
+                    linestyle=linestyle,
+                    linewidth=1.6,
+                    label=label,
+                )
+
+            for event_idx, event_time in enumerate(event_times):
+                linestyle = event_linestyles[event_idx % len(event_linestyles)]
+                ax.axvline(
+                    event_time,
+                    color="0.35",
+                    linestyle=linestyle,
+                    linewidth=1.0,
+                    alpha=0.75,
+                )
+
+            if row_idx == 0:
+                ax.set_title(effector.replace("_", " ").title())
+            if col_idx == 0:
+                ax.set_ylabel(f"x={space_x:g}, y={space_y:g}\nVariance across units")
+            if row_idx == len(targets) - 1:
+                ax.set_xlabel("Time from cue (s)")
+
+            ax.grid(alpha=0.18, linewidth=0.6)
+
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+
+    # Title occupies the highest line.
+    fig.suptitle(
+        "Across-unit variance of condition-mean activity",
+        y=0.995,
+        fontsize=14,
+    )
+
+    # Legend lies beneath the title.
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.965),
+        ncol=3,
+        frameon=False,
+    )
+
+    # Reserve the upper part of the figure for title and legend.
+    fig.tight_layout(
+        rect=(0.02, 0.02, 0.98, 0.92),
+        h_pad=1.0,
+        w_pad=0.8,
+    )
+
+    fig.savefig(
+        out_path,
+        dpi=300,
+        bbox_inches="tight",
+        pad_inches=0.15,
+    )
+    plt.close(fig)

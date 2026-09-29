@@ -16,8 +16,7 @@ import scripts.config as cfg
 
 def main(
     data_dir="data/new_data/flaffus",
-    plot=False,
-    plots_dir=Path("plots/TDR_CUE_NEW"),
+    plots_dir=Path("plots/TDR_CUE_VARIANCE"),
 ):
     """
     Load preprocessed trials, align spikes to cue, compute SDFs, then run TDR.
@@ -26,17 +25,19 @@ def main(
     plots_dir = Path(plots_dir)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    df = load_processed_trials(path=data_dir)
+    df = load_processed_trials(path=data_dir, filename="processed_trials.pkl")
 
     # ------------------------------------------------------------
     # Mean Centering
     # ------------------------------------------------------------
     df = mean_center_rates(
         df,
-        unit_cols=("session", "unit_ID"),
         rate_col="sdf_rate",
     )
 
+    # ------------------------------------------------------------
+    # Unit Filtering
+    # ------------------------------------------------------------
     unit_info = pd.read_excel(
         Path("data/unit_info.xlsx"),
         usecols=[0],
@@ -44,7 +45,6 @@ def main(
         header=None,
     )
     allowed_unit_ids = set(unit_info.iloc[:, 0].dropna().str.strip())
-
     df = df[df["unit_ID"].astype(str).str.strip().isin(allowed_unit_ids)].reset_index(
         drop=True
     )
@@ -87,7 +87,6 @@ def main(
         ),
         axis=1,
     )
-
     df["analysis_time"] = cue_sdf.apply(lambda x: x[0])
     df["analysis_rate"] = cue_sdf.apply(lambda x: x[1])
 
@@ -109,67 +108,6 @@ def main(
         & df["analysis_time"].apply(is_valid_array)
     ].reset_index(drop=True)
     analysis_time = np.asarray(df["analysis_time"].iloc[0], dtype=float)
-
-    # ------------------------------------------------------------
-    # Keep only units with enough trials in every 8-condition cell
-    # effector x reach_hand x target_hemifield
-    # ------------------------------------------------------------
-    min_trials_per_condition = 1
-    condition_cols_8cond = ("effector", "reach_hand", "target_hemifield")
-    condition_levels_8cond = {
-        "effector": ["reach", "saccade"],
-        "reach_hand": ["ipsi", "contra"],
-        "target_hemifield": ["ipsi", "contra"],
-    }
-    trials_per_8cond = count_rows_per_unit_condition(
-        df,
-        unit_cols=("unit_ID",),
-        condition_cols=condition_cols_8cond,
-        condition_levels=condition_levels_8cond,
-    )
-    trials_per_8cond.to_csv(
-        plots_dir / "rows_per_unit_per_8condition.csv",
-        index=False,
-    )
-
-    good_units = trials_per_8cond.groupby("unit_ID")["n_rows"].min().reset_index()
-    good_units = good_units[good_units["n_rows"] >= min_trials_per_condition][
-        ["unit_ID"]
-    ]
-    df = df.merge(
-        good_units,
-        on="unit_ID",
-        how="inner",
-    ).reset_index(drop=True)
-
-    # ------------------------------------------------------------
-    # Summary after all filtering
-    # ------------------------------------------------------------
-    n_units = df[["unit_ID"]].drop_duplicates().shape[0]
-    n_trials_total = len(df)
-
-    trials_per_unit = df.groupby("unit_ID").size().rename("n_trials").reset_index()
-
-    mean_trials_per_unit = trials_per_unit["n_trials"].mean()
-    sd_trials_per_unit = trials_per_unit["n_trials"].std(ddof=1)
-
-    print("\nAfter analysis-rate filtering:")
-    print(f"  Units: {n_units}")
-    print(f"  Rows / unit-trials: {n_trials_total}")
-
-    # ------------------------------------------------------------
-    # Common event markers for plots
-    # ------------------------------------------------------------
-    event_times = [
-        0.0,
-        np.nanmedian(df["t_go"]),
-    ]
-    event_labels = ["Cue", "GO"]
-    event_colors = ["black", "black"]
-    event_opacities = [0.04, 0.04]
-    event_linestyles = ["--", ":"]
-    event_linewidths = [1.2, 1.2]
-    event_alphas = [0.7, 0.8]
 
     columns_to_keep = [
         "unit_ID",
@@ -194,23 +132,87 @@ def main(
     # Regressors
     # ------------------------------------------------------------
 
-    # Condition-independent regressors
-    df = add_condition_independent_regressors(df)
+    def time_window(time, start_time, end_time):
+        time = np.asarray(time, dtype=float)
+        if not np.all(np.isfinite([start_time, end_time])):
+            return np.zeros_like(time, dtype=float)
+        return ((time >= start_time) & (time < end_time)).astype(float)
 
-    if plot:
-        plot_first_row_ci_windows(
-            df,
-            out_path=plots_dir / "ci_windows_first_row.png",
+    # Cue CI
+    df["cueCI"] = df.apply(
+        lambda row: time_window(
+            row["analysis_time"],
+            start_time=row["t_cue"] + 0.05,
+            end_time=row["t_cue"] + 0.20,
+        ),
+        axis=1,
+    )
+
+    # Planning CI
+    df["planCI"] = df.apply(
+        lambda row: time_window(
+            row["analysis_time"],
+            start_time=row["t_cue"] + 0.20,
+            end_time=row["t_mov"],
+        ),
+        axis=1,
+    )
+
+    # Movement CI
+    saccade_ci_window = (0.0, 0.10)
+    reach_ci_window = (0.0, 0.30)
+
+    def make_effector_movement_ci(row, effector, window):
+        time = np.asarray(row["analysis_time"], dtype=float)
+
+        # The regressor is zero for the other effector
+        if row["effector"] != effector:
+            return np.zeros_like(time, dtype=float)
+
+        start_offset, end_offset = window
+
+        return time_window(
+            time,
+            start_time=row["t_mov"] + start_offset,
+            end_time=row["t_mov"] + end_offset,
         )
+
+    df["sacCI"] = df.apply(
+        lambda row: make_effector_movement_ci(
+            row,
+            effector="saccade",
+            window=saccade_ci_window,
+        ),
+        axis=1,
+    )
+
+    df["reaCI"] = df.apply(
+        lambda row: make_effector_movement_ci(
+            row,
+            effector="reach",
+            window=reach_ci_window,
+        ),
+        axis=1,
+    )
 
     # ------------------------------------------------------------
     # Hand Regressor
     # ------------------------------------------------------------
     df["hand"] = df["reach_hand"].map({"contra": 1.0, "ipsi": -1.0})
-    df["hand"] = [
-        float(h) * np.ones_like(np.asarray(t, dtype=float))
-        for h, t in zip(df["hand"], df["analysis_time"])
+    df["hand_mask"] = [
+        (np.asarray(t, dtype=float) < float(t_mov)).astype(float)
+        for t, t_mov in zip(
+            df["analysis_time"],
+            df["t_mov"],
+        )
     ]
+
+    df = mask_regressors(
+        df,
+        regressors=("hand",),
+        mask_col="hand_mask",
+        suffix="",
+    )
 
     # ------------------------------------------------------------
     # Space regressors: target x/y
@@ -226,7 +228,7 @@ def main(
         suffix="_cue",
     )
 
-    target_counts = (
+    """ target_counts = (
         df.dropna(subset=["space_x", "space_y"])
         .groupby(["space_x", "space_y"])
         .size()
@@ -236,7 +238,7 @@ def main(
     target_counts.to_csv(
         plots_dir / "target_position_counts.csv",
         index=False,
-    )
+    ) """
 
     # ------------------------------------------------------------
     # Effector regressors
@@ -283,8 +285,8 @@ def main(
         # CI regressors
         "cueCI",
         "planCI",
-        "goCI",
-        "movCI",
+        "sacCI",
+        "reaCI",
         # Regressors
         "hand",
         "space_x_cue",
@@ -313,8 +315,8 @@ def main(
         # CI regressors
         "cueCI",
         "planCI",
-        "goCI",
-        "movCI",
+        "sacCI",
+        "reaCI",
         # Regressors
         "hand",
         "space_x_cue",
@@ -333,60 +335,10 @@ def main(
         "contra_hand_space_y_mov",
     )
 
-    # ------------------------------------------------------------
-    # Keep units with enough trials in every effector-target condition
-    # ------------------------------------------------------------
-    min_trials_per_condition = 1
-    trajectory_condition_cols = [
-        "effector",
-        "space_x",
-        "space_y",
-    ]
-    valid_conditions = (
-        df[trajectory_condition_cols].dropna().drop_duplicates().reset_index(drop=True)
-    )
-    print("\nNumber of effector-target conditions:", len(valid_conditions))
-    print(valid_conditions.groupby("effector").size().rename("n_target_positions"))
-    required_counts = (
-        df[["unit_ID"]].drop_duplicates().merge(valid_conditions, how="cross")
-    )
-    observed_counts = (
-        df.groupby(
-            ["unit_ID", *trajectory_condition_cols],
-            observed=True,
-        )
-        .size()
-        .rename("n_rows")
-        .reset_index()
-    )
-    trials_per_target_condition = required_counts.merge(
-        observed_counts,
-        on=["unit_ID", *trajectory_condition_cols],
-        how="left",
-    )
+    # Separate combined trials from axis-training trials
+    combined_df = df.loc[df["effector"].eq("saccade_reach")].copy()
+    df = df.loc[df["effector"].isin(["saccade", "reach"])].copy()
 
-    trials_per_target_condition["n_rows"] = (
-        trials_per_target_condition["n_rows"].fillna(0).astype(int)
-    )
-
-    trials_per_target_condition.to_csv(
-        plots_dir / "rows_per_unit_per_effector_target.csv",
-        index=False,
-    )
-
-    good_units = (
-        trials_per_target_condition.groupby("unit_ID")["n_rows"]
-        .min()
-        .loc[lambda counts: counts >= min_trials_per_condition]
-        .index
-    )
-    print(f"Units before effector-target filtering: " f"{df['unit_ID'].nunique()}")
-    print(f"Units after effector-target filtering: " f"{len(good_units)}")
-    df = df[df["unit_ID"].isin(good_units)].reset_index(drop=True)
-
-    # ------------------------------------------------------------
-    # Fit TDR axes
-    # ------------------------------------------------------------
     df["effector"] = np.where(
         df["effector"].eq("saccade"),
         "saccade",
@@ -398,12 +350,213 @@ def main(
         ),
     )
 
-    axes_raw, axes_ortho, units, task_regressors = fit_tdr_axes(
-        df,
-        regressors=regressors,
-        rate_col="analysis_rate",
-        time_col="analysis_time",
+    combined_df["effector"] = combined_df["reach_hand"].map(
+        {
+            "ipsi": "saccade_reach_ipsi_hand",
+            "contra": "saccade_reach_contra_hand",
+        }
     )
+    combined_df = combined_df.dropna(
+        subset=["effector", "space_x", "space_y"]
+    ).reset_index(drop=True)
+
+    # ------------------------------------------------------------
+    # Keep units with enough trials in every effector-target condition
+    # ------------------------------------------------------------
+    min_trials_per_condition = 5
+    trajectory_condition_cols = (
+        "effector",
+        "space_x",
+        "space_y",
+    )
+    df, _, _ = filter_units_by_min_condition_trials(
+        df,
+        unit_col="unit_ID",
+        condition_cols=trajectory_condition_cols,
+        min_trials_per_condition=min_trials_per_condition,
+        counts_out_path=(plots_dir / "rows_per_unit_per_effector_target.csv"),
+    )
+
+    # ------------------------------------------------------------
+    # Repeated train/test TDR
+    #
+    # For every repeat:
+    #   1. split real trials within each unit-condition cell
+    #   2. fit TDR axes using training trials only
+    #   3. compute condition averages from held-out test trials only
+    #   4. project the test averages onto the training-derived axes
+    # ------------------------------------------------------------
+    n_repeats = 20
+    test_frac = 0.3
+    split_condition_cols = [
+        "effector",
+        "space_x",
+        "space_y",
+    ]
+
+    # Store all the test projections and residuals here
+    test_projection_repeats = []
+    combined_projection_repeats = []
+    residual_repeats = []
+    condition_variance_repeats = []
+    axes_raw_repeats = []
+
+    for repeat_idx in range(n_repeats):
+        print(f"\nTrain/test TDR repeat {repeat_idx + 1}/{n_repeats}")
+
+        train_df, test_df = train_test_split_within_unit_condition(
+            df,
+            unit_col="unit_ID",
+            condition_cols=tuple(split_condition_cols),
+            test_frac=test_frac,
+            min_train_trials=2,
+            min_test_trials=1,
+            random_state=repeat_idx,
+        )
+
+        # Equalize the number of training trials for each condition.
+        # Oversampling occurs only after splitting, so no duplicated training
+        # observation can leak into the held-out test partition.
+        train_df = oversample_trials_within_unit_condition(
+            train_df,
+            unit_col="unit_ID",
+            condition_cols=tuple(trajectory_condition_cols),
+            random_state=10_000 + repeat_idx,
+        )
+
+        axes_raw_train, axes_ortho_train, units_train, regressors_train = fit_tdr_axes(
+            train_df,
+            regressors=regressors,
+            unit_col="unit_ID",
+            rate_col="analysis_rate",
+            time_col="analysis_time",
+        )
+
+        test_condition_trajectories = condition_mean_population(
+            test_df,
+            units_train,
+            condition_cols=tuple(trajectory_condition_cols),
+            unit_col="unit_ID",
+            rate_col="analysis_rate",
+        )
+
+        test_projections, _ = project_trajectories(
+            test_condition_trajectories,
+            axes_ortho_train,
+            regressors_train,
+        )
+
+        combined_condition_trajectories = condition_mean_population(
+            combined_df,
+            units_train,
+            condition_cols=("effector", "space_x", "space_y"),
+            unit_col="unit_ID",
+            rate_col="analysis_rate",
+        )
+
+        combined_projections, _ = project_trajectories(
+            combined_condition_trajectories,
+            axes_ortho_train,
+            regressors_train,
+        )
+
+        observed, reconstructed, residuals = compute_tdr_subspace_residuals(
+            test_condition_trajectories,
+            test_projections,
+            axes_ortho_train,
+        )
+        condition_variance = condition_mean_subspace_variance(
+            observed,
+            reconstructed,
+            residuals,
+            analysis_time,
+        )
+        condition_variance["repeat"] = repeat_idx
+
+        test_projection_repeats.append(test_projections)
+        combined_projection_repeats.append(combined_projections)
+        residual_repeats.append(residuals)
+        axes_raw_repeats.append(axes_raw_train)
+        condition_variance_repeats.append(condition_variance)
+
+    units = list(units_train)
+    task_regressors = tuple(regressors_train)
+    axis_names = list(task_regressors)
+    cond_order = sorted(
+        set.intersection(*[set(proj.keys()) for proj in test_projection_repeats])
+    )
+
+    trajectory_projections, trajectory_projection_sd = stack_projection_repeats(
+        test_projection_repeats,
+        cond_order,
+        axis_names,
+    )
+
+    combined_cond_order = sorted(
+        set.intersection(*[set(proj.keys()) for proj in combined_projection_repeats])
+    )
+
+    combined_trajectory_projections, combined_trajectory_projection_sd = (
+        stack_projection_repeats(
+            combined_projection_repeats,
+            combined_cond_order,
+            axis_names,
+        )
+    )
+    if n_repeats == 1:
+        trajectory_projection_sd = None
+        combined_trajectory_projection_sd = None
+
+    # ------------------------------------------------------------
+    # Condition-mean subspace variance across repeated splits
+    # ------------------------------------------------------------
+    condition_variance_by_repeat = pd.concat(
+        condition_variance_repeats,
+        ignore_index=True,
+    )
+    variance_group_cols = ["effector", "space_x", "space_y", "time"]
+    variance_metric_cols = [
+        "observed_variance",
+        "reconstructed_variance",
+        "residual_variance",
+        "observed_energy",
+        "reconstructed_energy",
+        "residual_energy",
+        "reconstruction_r2",
+    ]
+
+    missing_variance_cols = set(
+        variance_group_cols + variance_metric_cols + ["repeat"]
+    ).difference(condition_variance_by_repeat.columns)
+    if missing_variance_cols:
+        raise ValueError(
+            "condition_mean_subspace_variance returned an unexpected schema; "
+            f"missing columns: {sorted(missing_variance_cols)}"
+        )
+
+    condition_variance_mean = condition_variance_by_repeat.groupby(
+        variance_group_cols,
+        as_index=False,
+        observed=True,
+    )[variance_metric_cols].mean()
+    variance_repeat_counts = (
+        condition_variance_by_repeat.groupby(
+            variance_group_cols,
+            as_index=False,
+            observed=True,
+        )["repeat"]
+        .nunique()
+        .rename(columns={"repeat": "n_repeats"})
+    )
+    condition_variance_mean = condition_variance_mean.merge(
+        variance_repeat_counts,
+        on=variance_group_cols,
+        how="left",
+        validate="one_to_one",
+    )
+
+    # Average the training-derived raw beta vectors across repeated splits
+    axes_raw = np.mean(np.stack(axes_raw_repeats, axis=0), axis=0)
 
     # ------------------------------------------------------------
     # TDR beta/effect-size statistics
@@ -427,25 +580,6 @@ def main(
     )
 
     # ------------------------------------------------------------
-    # Condition-averaged trajectories
-    # ------------------------------------------------------------
-
-    condition_trajectories = condition_mean_population(
-        df,
-        units,  # From TDR function
-        condition_cols=("effector", "space_x", "space_y"),
-        unit_cols=("unit_ID",),
-        rate_col="analysis_rate",
-    )
-    trajectory_projections, _ = project_trajectories(
-        condition_trajectories,
-        axes_ortho,
-        task_regressors,
-    )
-    axis_names = list(task_regressors)
-    cond_order = sorted(trajectory_projections.keys())
-
-    # ------------------------------------------------------------
     # Common event markers for plots
     # ------------------------------------------------------------
     event_times = [
@@ -459,6 +593,14 @@ def main(
     event_linewidths = [1.2, 1.2]
     event_alphas = [0.7, 0.8]
 
+    plot_condition_mean_variance_grid(
+        condition_variance_mean,
+        out_path=plots_dir / "condition_mean_subspace_variance.png",
+        event_times=event_times,
+        event_linestyles=event_linestyles,
+        downsample=3,
+    )
+
     # ------------------------------------------------------------
     # Plot with 6 subplots
     # ------------------------------------------------------------
@@ -470,6 +612,7 @@ def main(
         row_axes,
         analysis_time,
         axis_names,
+        projections_sem=trajectory_projection_sd,
         out_path=plots_dir / "saccade_planning_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
@@ -486,6 +629,7 @@ def main(
         row_axes,
         analysis_time,
         axis_names,
+        projections_sem=trajectory_projection_sd,
         out_path=plots_dir / "ipsi_hand_planning_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
@@ -502,6 +646,7 @@ def main(
         row_axes,
         analysis_time,
         axis_names,
+        projections_sem=trajectory_projection_sd,
         out_path=plots_dir / "contra_hand_planning_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
@@ -518,6 +663,7 @@ def main(
         row_axes,
         analysis_time,
         axis_names,
+        projections_sem=trajectory_projection_sd,
         out_path=plots_dir / "saccade_movement_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
@@ -534,6 +680,7 @@ def main(
         row_axes,
         analysis_time,
         axis_names,
+        projections_sem=trajectory_projection_sd,
         out_path=plots_dir / "ipsi_hand_movement_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
@@ -550,6 +697,7 @@ def main(
         row_axes,
         analysis_time,
         axis_names,
+        projections_sem=trajectory_projection_sd,
         out_path=plots_dir / "contra_hand_movement_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
@@ -566,6 +714,7 @@ def main(
         row_axes,
         analysis_time,
         axis_names,
+        projections_sem=trajectory_projection_sd,
         out_path=plots_dir / "space_cue_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
@@ -579,14 +728,15 @@ def main(
     row_axes = (
         "cueCI",
         "planCI",
-        "goCI",
-        "movCI",
+        "sacCI",
+        "reaCI",
     )
     plot_tdr_grid(
         trajectory_projections,
         row_axes,
         analysis_time,
         axis_names,
+        projections_sem=trajectory_projection_sd,
         out_path=plots_dir / "CI_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
@@ -603,6 +753,7 @@ def main(
         row_axes,
         analysis_time,
         axis_names,
+        projections_sem=trajectory_projection_sd,
         out_path=plots_dir / "hand_axes_by_effector.png",
         event_times=event_times,
         event_labels=event_labels,
@@ -612,6 +763,74 @@ def main(
         event_alphas=event_alphas,
         downsample=downsample,
     )
+
+    combined_effectors = (
+        "saccade_reach_contra_hand",
+        "saccade_reach_ipsi_hand",
+    )
+
+    combined_effector_labels = {
+        "saccade_reach_contra_hand": "Combined: contra-hand",
+        "saccade_reach_ipsi_hand": "Combined: ipsi-hand",
+    }
+
+    combined_plot_specs = [
+        (
+            "combined_saccade_planning_axes.png",
+            ("saccade_space_x_plan", "saccade_space_y_plan"),
+        ),
+        (
+            "combined_ipsi_hand_planning_axes.png",
+            ("ipsi_hand_space_x_plan", "ipsi_hand_space_y_plan"),
+        ),
+        (
+            "combined_contra_hand_planning_axes.png",
+            ("contra_hand_space_x_plan", "contra_hand_space_y_plan"),
+        ),
+        (
+            "combined_saccade_movement_axes.png",
+            ("saccade_space_x_mov", "saccade_space_y_mov"),
+        ),
+        (
+            "combined_ipsi_hand_movement_axes.png",
+            ("ipsi_hand_space_x_mov", "ipsi_hand_space_y_mov"),
+        ),
+        (
+            "combined_contra_hand_movement_axes.png",
+            ("contra_hand_space_x_mov", "contra_hand_space_y_mov"),
+        ),
+        (
+            "combined_space_cue_axes.png",
+            ("space_x_cue", "space_y_cue"),
+        ),
+        (
+            "combined_CI_axes.png",
+            ("cueCI", "planCI", "sacCI", "reaCI"),
+        ),
+        (
+            "combined_hand_axis.png",
+            ("hand",),
+        ),
+    ]
+
+    for filename, row_axes in combined_plot_specs:
+        plot_tdr_grid(
+            combined_trajectory_projections,
+            row_axes,
+            analysis_time,
+            axis_names,
+            projections_sem=combined_trajectory_projection_sd,
+            effectors=combined_effectors,
+            effector_labels=combined_effector_labels,
+            out_path=plots_dir / filename,
+            event_times=event_times,
+            event_labels=event_labels,
+            event_linestyles=event_linestyles,
+            event_colors=event_colors,
+            event_linewidths=event_linewidths,
+            event_alphas=event_alphas,
+            downsample=downsample,
+        )
 
 
 if __name__ == "__main__":
@@ -623,20 +842,13 @@ if __name__ == "__main__":
         help="Folder containing new-format population_*.mat and trials_*.mat files.",
     )
     parser.add_argument(
-        "--plot",
-        action="store_true",
-        default=False,
-        help="Generate preprocessing plots.",
-    )
-    parser.add_argument(
         "--plots_dir",
         type=Path,
-        default=Path("plots/TDR_CUE"),
+        default=Path("plots/TDR_CUE_VARIANCE"),
         help="Directory where TDR output plots and CSV files are saved.",
     )
     args = parser.parse_args()
     main(
         data_dir=args.data_dir,
-        plot=args.plot,
         plots_dir=args.plots_dir,
     )

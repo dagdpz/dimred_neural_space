@@ -90,6 +90,59 @@ def add_condition_independent_regressors(df):
     return df
 
 
+def add_condition_independent_regressors_nogo(df):
+    """
+    Add condition-independent, time-dependent regressors.
+
+    Each new regressor is stored as a 1D array with the same length as
+    `analysis_time`.
+    """
+    time_col = "analysis_time"
+
+    df = df.copy()
+
+    if len(df) == 0:
+        raise ValueError("Cannot add CI regressors to an empty dataframe.")
+
+    required_cols = [time_col, "t_cue", "t_mov", "t_mov_end"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+
+    cueCI = []
+    planCI = []
+    movCI = []
+
+    for _, row in df.iterrows():
+        t = np.asarray(row[time_col], dtype=float)
+
+        if t.ndim != 1 or t.size == 0 or not np.all(np.isfinite(t)):
+            cueCI.append(np.full(0, np.nan))
+            planCI.append(np.full(0, np.nan))
+            movCI.append(np.full(0, np.nan))
+            continue
+
+        t_mov = float(row["t_mov"])
+        t_cue = float(row["t_cue"])
+        t_mov_end = float(row["t_mov_end"])
+
+        if not np.isfinite(t_mov):
+            cueCI.append(np.zeros_like(t, dtype=float))
+            planCI.append(np.zeros_like(t, dtype=float))
+            movCI.append(np.zeros_like(t, dtype=float))
+            continue
+
+        cueCI.append(((t >= t_cue + 0.05) & (t < t_cue + 0.2)).astype(float))
+        planCI.append(((t >= t_cue + 0.2) & (t < t_mov)).astype(float))
+        movCI.append(((t >= t_mov) & (t < t_mov + 0.3)).astype(float))
+
+    df["cueCI"] = cueCI
+    df["planCI"] = planCI
+    df["movCI"] = movCI
+
+    return df
+
+
 def add_condition_independent_regressors_mov(df):
     """
     Add condition-independent, time-dependent regressors.
@@ -349,6 +402,159 @@ def mask_regressors(
     return df
 
 
+def filter_units_by_min_condition_trials(
+    df,
+    *,
+    unit_col="unit_ID",
+    condition_cols=("effector", "space_x", "space_y"),
+    min_trials_per_condition=5,
+    counts_out_path=None,
+):
+    """
+    Keep only units having at least `min_trials_per_condition` trials
+    in every observed condition.
+
+    Returns
+    -------
+    filtered_df : pd.DataFrame
+        Input dataframe restricted to qualifying units.
+
+    trials_per_condition : pd.DataFrame
+        Trial counts for every unit x condition combination. Missing
+        combinations appear with n_rows=0.
+
+    good_units : pd.DataFrame
+        Unit identifiers that passed the criterion.
+    """
+    condition_cols = list(condition_cols)
+
+    required_cols = [unit_col, *condition_cols]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
+    if min_trials_per_condition < 1:
+        raise ValueError("min_trials_per_condition must be at least 1.")
+
+    # Conditions that exist somewhere in the dataset.
+    valid_conditions = (
+        df[condition_cols].dropna().drop_duplicates().reset_index(drop=True)
+    )
+    units = df[[unit_col]].drop_duplicates().reset_index(drop=True)
+    if valid_conditions.empty:
+        raise ValueError("No valid conditions were found.")
+    if units.empty:
+        raise ValueError("No units were found.")
+
+    # Every unit is required to possess every observed condition.
+    required_counts = units.merge(valid_conditions, how="cross")
+
+    observed_counts = (
+        df.dropna(subset=condition_cols)
+        .groupby(
+            [unit_col, *condition_cols],
+            observed=True,
+        )
+        .size()
+        .rename("n_rows")
+        .reset_index()
+    )
+
+    trials_per_condition = required_counts.merge(
+        observed_counts,
+        on=[unit_col, *condition_cols],
+        how="left",
+    )
+
+    trials_per_condition["n_rows"] = (
+        trials_per_condition["n_rows"].fillna(0).astype(int)
+    )
+
+    good_units = (
+        trials_per_condition.groupby(unit_col)["n_rows"]
+        .min()
+        .loc[lambda counts: counts >= min_trials_per_condition]
+        .index
+    )
+
+    filtered_df = df[df[unit_col].isin(good_units)].reset_index(drop=True)
+
+    if counts_out_path is not None:
+        counts_out_path = Path(counts_out_path)
+        counts_out_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        trials_per_condition.to_csv(
+            counts_out_path,
+            index=False,
+        )
+
+    print(f"Units before condition filtering: {len(units)}")
+    print(f"Units after condition filtering: {len(good_units)}")
+
+    return filtered_df, trials_per_condition, good_units
+
+
+def oversample_trials_within_unit_condition(
+    df,
+    *,
+    unit_col="unit_ID",
+    condition_cols=("effector", "space_x", "space_y"),
+    random_state=0,
+):
+    """
+    Balance condition counts separately within each unit.
+
+    For every unit, smaller condition cells are sampled with replacement
+    until they equal that unit's largest condition cell.
+
+    Different units may still have different total row counts.
+    """
+    condition_cols = list(condition_cols)
+    group_cols = [unit_col, *condition_cols]
+
+    missing_cols = [col for col in group_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing grouping columns: {missing_cols}")
+    if df.empty:
+        return df.copy()
+    if df[group_cols].isna().any().any():
+        raise ValueError(
+            "Unit and condition columns must not contain "
+            "missing values before oversampling."
+        )
+
+    rng = np.random.default_rng(random_state)
+    balanced_groups = []
+
+    for _, unit_df in df.groupby(
+        unit_col,
+        sort=False,
+        observed=True,
+    ):
+        condition_groups = list(
+            unit_df.groupby(
+                condition_cols,
+                sort=False,
+                observed=True,
+            )
+        )
+        target_count = max(len(condition_df) for _, condition_df in condition_groups)
+
+        for _, condition_df in condition_groups:
+            balanced_groups.append(condition_df.copy())
+            n_extra = target_count - len(condition_df)
+            if n_extra > 0:
+                sampled_positions = rng.choice(
+                    len(condition_df),
+                    size=n_extra,
+                    replace=True,
+                )
+                balanced_groups.append(condition_df.iloc[sampled_positions].copy())
+
+    return pd.concat(balanced_groups, ignore_index=True)
+
+
 def lowdin_orthogonalization(A, tol=1e-12):
     """
     Löwdin symmetric orthogonalization.
@@ -382,61 +588,51 @@ def lowdin_orthogonalization(A, tol=1e-12):
 
 def fit_tdr_axes(
     df,
+    regressors,
     *,
-    unit_cols=("unit_ID",),
-    regressors=("E", "T", "H"),
+    unit_col="unit_ID",
     rate_col="analysis_rate",
     time_col="analysis_time",
-    interaction_regressors=("EH", "ET"),
-    no_interaction=True,
 ):
     """
-    Fit one multilinear regression per unit.
+    Fit one multilinear regression independently for every unit.
 
-    Each regressor can be either:
-        - array-valued: one vector per trial, length n_time
-        - scalar-valued: one value per trial, repeated over time
+    Each regressor may be either:
+
+    - array-valued: one time series per trial
+    - scalar-valued: one value per trial, repeated across time
 
     Returns
     -------
-    axes_raw : ndarray, shape n_units x n_regressors
-        Raw regression beta vectors.
+    axes_raw : ndarray
+        Shape: n_units x n_regressors.
 
-    axes_ortho : ndarray, shape n_units x n_regressors
-        Orthogonalized TDR axes.
+    axes_ortho : ndarray
+        Orthogonalized axes with shape n_units x n_regressors.
 
     units_used : list
-        Units retained in the regression.
+        Unit IDs in the same order as the rows of the axis matrices.
 
     task_regressors : tuple
-        Names of returned axes.
+        Regressor names in the same order as the axis columns.
     """
     df = df.copy()
-
     task_regressors = tuple(regressors)
-    if not no_interaction:
-        task_regressors = task_regressors + tuple(interaction_regressors)
+    if not task_regressors:
+        raise ValueError("At least one regressor is required.")
 
-    missing_regressors = [reg for reg in task_regressors if reg not in df.columns]
-    if missing_regressors:
-        raise ValueError(f"Missing regressor columns: {missing_regressors}")
-
-    missing_required = [
-        col for col in list(unit_cols) + [rate_col, time_col] if col not in df.columns
+    missing_cols = [
+        col
+        for col in (
+            unit_col,
+            *task_regressors,
+            rate_col,
+            time_col,
+        )
+        if col not in df.columns
     ]
-    if missing_required:
-        raise ValueError(f"Missing required columns: {missing_required}")
-
-    # ------------------------------------------------------------
-    # Get units
-    # ------------------------------------------------------------
-    units = (
-        df[list(unit_cols)]
-        .drop_duplicates()
-        .sort_values(list(unit_cols))
-        .itertuples(index=False, name=None)
-    )
-    units = list(units)
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
 
     betas = []
     units_used = []
@@ -444,31 +640,37 @@ def fit_tdr_axes(
     # ------------------------------------------------------------
     # Fit one regression per unit
     # ------------------------------------------------------------
-    for unit in units:
-        unit_df = df.copy()
+    for unit, unit_df in df.groupby(
+        unit_col,
+        sort=True,
+        observed=True,
+    ):
+        required_cols = [
+            *task_regressors,
+            rate_col,
+            time_col,
+        ]
 
-        for col, val in zip(unit_cols, unit):
-            unit_df = unit_df[unit_df[col] == val]
-
-        required_cols = list(task_regressors) + [rate_col, time_col]
         unit_df = unit_df.dropna(subset=required_cols).copy()
 
-        if len(unit_df) == 0:
+        if unit_df.empty:
             continue
 
         # ------------------------------------------------------------
         # Response matrix: trials x time
         # ------------------------------------------------------------
         rates = np.stack(unit_df[rate_col].to_numpy()).astype(float)
-
-        if rates.ndim != 2 or not np.all(np.isfinite(rates)):
+        if rates.ndim != 2:
+            continue
+        if not np.all(np.isfinite(rates)):
             continue
 
         n_trials, n_time = rates.shape
         y = rates.reshape(-1)
-
-        # Use the first time vector only to check length.
-        time = np.asarray(unit_df[time_col].iloc[0], dtype=float)
+        time = np.asarray(
+            unit_df[time_col].iloc[0],
+            dtype=float,
+        )
         if time.ndim != 1 or time.size != n_time or not np.all(np.isfinite(time)):
             continue
 
@@ -477,31 +679,35 @@ def fit_tdr_axes(
         # ------------------------------------------------------------
         X_cols = []
 
-        for reg in task_regressors:
-            first_val = unit_df[reg].iloc[0]
+        for regressor in task_regressors:
+            first_value = unit_df[regressor].iloc[0]
 
-            # Array-valued time-dependent regressor
-            if isinstance(first_val, (np.ndarray, list, tuple)):
-                X_reg = np.stack(unit_df[reg].to_numpy()).astype(float)
-
+            if isinstance(
+                first_value,
+                (np.ndarray, list, tuple),
+            ):
+                # Time-dependent regressor.
+                X_reg = np.stack(unit_df[regressor].to_numpy()).astype(float)
                 if X_reg.shape != rates.shape:
                     raise ValueError(
-                        f"Regressor {reg!r} has shape {X_reg.shape}, "
-                        f"but rates have shape {rates.shape}. "
-                        "Each time-dependent regressor must have one array per trial "
-                        "with the same length as analysis_rate."
+                        f"Regressor {regressor!r} has shape "
+                        f"{X_reg.shape}, but rates have shape "
+                        f"{rates.shape}."
                     )
-
                 if not np.all(np.isfinite(X_reg)):
-                    raise ValueError(f"Regressor {reg!r} contains non-finite values.")
+                    raise ValueError(
+                        f"Regressor {regressor!r} contains " "non-finite values."
+                    )
                 X_cols.append(X_reg.reshape(-1))
 
-            # Scalar trial-level regressor
             else:
-                values = unit_df[reg].to_numpy(dtype=float)
+                # Scalar trial-level regressor.
+                values = unit_df[regressor].to_numpy(dtype=float)
 
                 if not np.all(np.isfinite(values)):
-                    raise ValueError(f"Regressor {reg!r} contains non-finite values.")
+                    raise ValueError(
+                        f"Regressor {regressor!r} contains " "non-finite values."
+                    )
 
                 X_cols.append(np.repeat(values, n_time))
 
@@ -509,7 +715,8 @@ def fit_tdr_axes(
 
         if X.shape[0] != y.shape[0]:
             raise ValueError(
-                f"Design matrix has {X.shape[0]} rows, " f"but y has {y.shape[0]} rows."
+                f"Design matrix has {X.shape[0]} rows, "
+                f"but response has {y.shape[0]} rows."
             )
 
         if not np.all(np.isfinite(X)):
@@ -518,24 +725,179 @@ def fit_tdr_axes(
         # ------------------------------------------------------------
         # Fit regression for this unit
         # ------------------------------------------------------------
-        model = LinearRegression(fit_intercept=True)
+        model = LinearRegression(
+            fit_intercept=True,
+        )
         model.fit(X, y)
 
-        beta = np.asarray(model.coef_, dtype=float)
+        beta = np.asarray(
+            model.coef_,
+            dtype=float,
+        )
         betas.append(beta)
         units_used.append(unit)
 
-    if len(betas) == 0:
-        raise ValueError("No units were successfully fit.")
+    if not betas:
+        raise ValueError("No units were successfully fitted.")
 
-    axes_raw = np.stack(betas, axis=0)
+    axes_raw = np.stack(
+        betas,
+        axis=0,
+    )
 
-    # ------------------------------------------------------------
-    # Orthogonalize axes
-    # ------------------------------------------------------------
     axes_ortho = lowdin_orthogonalization(axes_raw)
 
-    return axes_raw, axes_ortho, units_used, task_regressors
+    return (
+        axes_raw,
+        axes_ortho,
+        units_used,
+        task_regressors,
+    )
+
+
+def compute_tdr_subspace_residuals(
+    condition_trajectories,
+    condition_projections,
+    axes_ortho,
+):
+    """
+    Reconstruct condition trajectories from the TDR subspace.
+
+    Returns
+    -------
+    observed : dict
+        Condition -> observed activity, n_units x n_time.
+
+    reconstructed : dict
+        Condition -> TDR-reconstructed activity, n_units x n_time.
+
+    residuals : dict
+        Condition -> observed minus reconstructed activity,
+        n_units x n_time.
+    """
+    axes_ortho = np.asarray(axes_ortho, dtype=float)
+
+    if axes_ortho.ndim != 2:
+        raise ValueError("axes_ortho must have shape n_units x n_axes.")
+
+    if not np.all(np.isfinite(axes_ortho)):
+        raise ValueError("axes_ortho contains non-finite values.")
+
+    n_units, n_axes = axes_ortho.shape
+
+    trajectory_conditions = set(condition_trajectories)
+    projection_conditions = set(condition_projections)
+
+    if trajectory_conditions != projection_conditions:
+        missing_projections = trajectory_conditions - projection_conditions
+        missing_trajectories = projection_conditions - trajectory_conditions
+
+        raise ValueError(
+            "Condition mismatch between trajectories and projections. "
+            f"Missing projections: {sorted(missing_projections)}; "
+            f"missing trajectories: {sorted(missing_trajectories)}."
+        )
+
+    observed = {}
+    reconstructed = {}
+    residuals = {}
+
+    for condition in condition_trajectories:
+        condition_observed = np.asarray(
+            condition_trajectories[condition],
+            dtype=float,
+        )
+
+        condition_projection = np.asarray(
+            condition_projections[condition],
+            dtype=float,
+        )
+
+        if condition_observed.ndim != 2:
+            raise ValueError(
+                f"Condition {condition!r}: observed activity must "
+                "have shape n_units x n_time."
+            )
+
+        if condition_projection.ndim != 2:
+            raise ValueError(
+                f"Condition {condition!r}: projection must "
+                "have shape n_axes x n_time."
+            )
+
+        if condition_observed.shape[0] != n_units:
+            raise ValueError(
+                f"Condition {condition!r}: observed activity has "
+                f"{condition_observed.shape[0]} units; expected "
+                f"{n_units}."
+            )
+
+        if condition_projection.shape[0] != n_axes:
+            raise ValueError(
+                f"Condition {condition!r}: projection has "
+                f"{condition_projection.shape[0]} axes; expected "
+                f"{n_axes}."
+            )
+
+        if condition_observed.shape[1] != condition_projection.shape[1]:
+            raise ValueError(
+                f"Condition {condition!r}: observed and projected "
+                "trajectories have different time lengths."
+            )
+
+        if not np.all(np.isfinite(condition_observed)):
+            raise ValueError(
+                f"Condition {condition!r}: observed activity "
+                "contains non-finite values."
+            )
+
+        if not np.all(np.isfinite(condition_projection)):
+            raise ValueError(
+                f"Condition {condition!r}: projection contains " "non-finite values."
+            )
+
+        condition_reconstructed = axes_ortho @ condition_projection
+        condition_residuals = condition_observed - condition_reconstructed
+
+        observed[condition] = condition_observed
+        reconstructed[condition] = condition_reconstructed
+        residuals[condition] = condition_residuals
+
+    return observed, reconstructed, residuals
+
+
+def stack_curve_repeats(curve_repeats, cond_order):
+    """
+    Average one-dimensional time-resolved curves across repetitions.
+
+    Each curve_repeats element is:
+        condition -> array of shape (n_time,)
+
+    Returns
+    -------
+    mean_curves : dict
+        condition -> mean curve, shape (n_time,)
+
+    sd_curves : dict
+        condition -> across-repeat SD, shape (n_time,)
+    """
+    mean_curves = {}
+    sd_curves = {}
+
+    for condition in cond_order:
+        curves = np.stack(
+            [repeat[condition] for repeat in curve_repeats],
+            axis=0,
+        )  # n_repeats x n_time
+
+        mean_curves[condition] = np.nanmean(curves, axis=0)
+
+        if curves.shape[0] > 1:
+            sd_curves[condition] = np.nanstd(curves, axis=0, ddof=1)
+        else:
+            sd_curves[condition] = np.zeros_like(curves[0])
+
+    return mean_curves, sd_curves
 
 
 def summarize_tdr_beta_effect_sizes(
@@ -975,31 +1337,111 @@ def train_test_split_within_unit_condition(
     return train_df, test_df
 
 
-def stack_projection_repeats(projection_repeats, cond_order, axis_names):
-    """
-    Convert repeated projection dictionaries into:
-        mean_proj[cond]: n_axes x n_time
-        sem_proj[cond]:  n_axes x n_time
+def oversample_units_to_equal_trials(
+    df,
+    *,
+    unit_col="unit_ID",
+    target_n_trials=None,
+    random_state=0,
+):
+    """Randomly oversample units to an equal number of rows.
 
-    projection_repeats is a list of dicts:
-        projection_repeats[repeat][condition] = n_axes x n_time
+    Every original row is retained. For units with fewer than the target
+    number of trials, the missing rows are sampled from that unit with
+    replacement. By default, the target is the largest unit trial count in
+    the supplied dataframe.
+
+    This function should be applied to training data only, after the original
+    trials have been divided into train and test partitions.
+    """
+    if unit_col not in df.columns:
+        raise ValueError(f"Missing required unit column: {unit_col!r}")
+    if df.empty:
+        raise ValueError("Cannot oversample an empty dataframe.")
+
+    counts_before = df.groupby(unit_col, sort=True).size().rename("n_trials")
+
+    if target_n_trials is None:
+        target_n_trials = int(counts_before.max())
+    else:
+        target_n_trials = int(target_n_trials)
+
+    if target_n_trials < int(counts_before.max()):
+        raise ValueError(
+            "target_n_trials must be at least the largest existing unit "
+            f"count ({int(counts_before.max())}); otherwise this would also "
+            "perform subsampling."
+        )
+
+    rng = np.random.default_rng(random_state)
+    sampled_groups = []
+    for _, unit_df in df.groupby(unit_col, sort=True):
+        n_extra = target_n_trials - len(unit_df)
+        if n_extra > 0:
+            extra_indices = rng.choice(
+                unit_df.index.to_numpy(),
+                size=n_extra,
+                replace=True,
+            )
+            extra_df = df.loc[extra_indices].copy()
+            unit_df = pd.concat([unit_df, extra_df], ignore_index=False)
+
+        sampled_groups.append(unit_df)
+    oversampled_df = pd.concat(sampled_groups, ignore_index=True)
+    counts_after = oversampled_df.groupby(unit_col).size()
+
+    if not (counts_after == target_n_trials).all():
+        raise RuntimeError("Oversampling failed to equalize unit trial counts.")
+
+    print("\nTraining-unit oversampling:")
+    print(f"  Units: {len(counts_before)}")
+    print(
+        f"  Trials per unit before: "
+        f"min={int(counts_before.min())}, "
+        f"median={counts_before.median():.1f}, "
+        f"max={int(counts_before.max())}"
+    )
+    print(f"  Trials per unit after:  {target_n_trials}")
+    print(f"  Training rows before:   {len(df)}")
+    print(f"  Training rows after:    {len(oversampled_df)}")
+
+    return oversampled_df
+
+
+def stack_projection_repeats(
+    projection_repeats,
+    cond_order,
+    axis_names,
+):
+    """
+    Average projected trajectories across repetitions.
+
+    With one repetition, the mean is still defined, but an
+    across-repeat SD is not. A zero array is returned as a
+    shape-compatible placeholder.
     """
     mean_proj = {}
-    sem_proj = {}
+    sd_proj = {}
 
     for cond in cond_order:
         arr = np.stack(
             [rep[cond] for rep in projection_repeats if cond in rep],
             axis=0,
         )
-        # arr shape: n_repeats x n_axes x n_time
+        # n_repeats x n_axes x n_time
 
         mean_proj[cond] = np.nanmean(arr, axis=0)
 
-        n = np.sum(np.all(np.isfinite(arr), axis=(1, 2)))
-        sem_proj[cond] = np.nanstd(arr, axis=0, ddof=1) / np.sqrt(arr.shape[0])
+        if arr.shape[0] > 1:
+            sd_proj[cond] = np.nanstd(
+                arr,
+                axis=0,
+                ddof=1,
+            )
+        else:
+            sd_proj[cond] = np.zeros_like(mean_proj[cond])
 
-    return mean_proj, sem_proj
+    return mean_proj, sd_proj
 
 
 def bootstrap_resample_units(
@@ -1069,3 +1511,59 @@ def stack_projection_bootstraps(
         upper_proj[cond] = np.nanpercentile(arr, 97.5, axis=0)
 
     return mean_proj, lower_proj, upper_proj
+
+
+def condition_mean_subspace_variance(
+    observed,
+    reconstructed,
+    residuals,
+    analysis_time,
+):
+    rows = []
+    for cond in observed.keys():
+        # Variance across units at every time point.
+        observed_variance = np.var(observed[cond], axis=0, ddof=1)
+        reconstructed_variance = np.var(reconstructed[cond], axis=0, ddof=1)
+        residual_variance = np.var(residuals[cond], axis=0, ddof=1)
+
+        # Population energy has an exact additive decomposition for an
+        # orthogonal projection; ordinary across-unit variance need not.
+        observed_energy = np.mean(observed[cond] ** 2, axis=0)
+        reconstructed_energy = np.mean(reconstructed[cond] ** 2, axis=0)
+        residual_energy = np.mean(residuals[cond] ** 2, axis=0)
+
+        # Conventional reconstruction R^2 across units. It is deliberately
+        # kept separate from the energy fraction and may be negative.
+        sse = np.sum(residuals[cond] ** 2, axis=0)
+        centered = observed[cond] - np.mean(
+            observed[cond],
+            axis=0,
+            keepdims=True,
+        )
+        sst = np.sum(centered**2, axis=0)
+        reconstruction_r2 = 1.0 - np.divide(
+            sse,
+            sst,
+            out=np.full(analysis_time.size, np.nan),
+            where=sst > 0,
+        )
+
+        effector, space_x, space_y = cond
+        for t_idx, t in enumerate(analysis_time):
+            rows.append(
+                {
+                    "effector": effector,
+                    "space_x": space_x,
+                    "space_y": space_y,
+                    "time": t,
+                    "observed_variance": observed_variance[t_idx],
+                    "reconstructed_variance": reconstructed_variance[t_idx],
+                    "residual_variance": residual_variance[t_idx],
+                    "observed_energy": observed_energy[t_idx],
+                    "reconstructed_energy": reconstructed_energy[t_idx],
+                    "residual_energy": residual_energy[t_idx],
+                    "reconstruction_r2": reconstruction_r2[t_idx],
+                }
+            )
+
+    return pd.DataFrame(rows)
