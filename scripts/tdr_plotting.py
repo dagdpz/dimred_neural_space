@@ -3043,3 +3043,79 @@ def plot_condition_mean_variance_grid(
         pad_inches=0.15,
     )
     plt.close(fig)
+
+
+def plot_tdr_axis_angle_diagnostics(
+    raw_angle_matrix,
+    raw_to_ortho_alignment,
+    axis_changes,
+    *,
+    out_path=None,
+):
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(17, 5),
+        constrained_layout=True,
+    )
+
+    # Raw beta-vector angles
+    image = axes[0].imshow(
+        raw_angle_matrix,
+        vmin=0,
+        vmax=180,
+        cmap="viridis",
+    )
+    axes[0].set_title("Raw beta-vector angles")
+    axes[0].set_xticks(range(len(raw_angle_matrix.columns)))
+    axes[0].set_yticks(range(len(raw_angle_matrix.index)))
+    axes[0].set_xticklabels(
+        raw_angle_matrix.columns,
+        rotation=90,
+    )
+    axes[0].set_yticklabels(raw_angle_matrix.index)
+    fig.colorbar(image, ax=axes[0], label="Angle (degrees)")
+
+    # Every raw axis against every orthogonalized axis
+    image = axes[1].imshow(
+        raw_to_ortho_alignment,
+        vmin=-1,
+        vmax=1,
+        cmap="coolwarm",
+    )
+    axes[1].set_title("Raw-to-orthogonal alignment")
+    axes[1].set_xlabel("Orthogonalized axis")
+    axes[1].set_ylabel("Raw beta vector")
+    axes[1].set_xticks(range(len(raw_to_ortho_alignment.columns)))
+    axes[1].set_yticks(range(len(raw_to_ortho_alignment.index)))
+    axes[1].set_xticklabels(
+        raw_to_ortho_alignment.columns,
+        rotation=90,
+    )
+    axes[1].set_yticklabels(
+        raw_to_ortho_alignment.index,
+    )
+    fig.colorbar(image, ax=axes[1], label="Cosine similarity")
+
+    # Change in each corresponding axis
+    axes[2].bar(
+        axis_changes["axis"],
+        axis_changes["axis_rotation_deg"],
+    )
+    axes[2].set_title("Rotation caused by Löwdin")
+    axes[2].set_ylabel("Axis rotation (degrees)")
+    axes[2].set_ylim(0, 90)
+    axes[2].tick_params(axis="x", rotation=90)
+    axes[2].axhline(
+        45,
+        color="0.5",
+        linestyle="--",
+        linewidth=1,
+    )
+
+    if out_path is not None:
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+
+    return fig, axes

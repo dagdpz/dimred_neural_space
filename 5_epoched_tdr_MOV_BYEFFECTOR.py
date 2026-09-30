@@ -16,7 +16,6 @@ import scripts.config as cfg
 
 def main(
     data_dir="data/new_data/flaffus",
-    plot=False,
     plots_dir=Path("plots/TDR_MOV_NEW"),
 ):
     """
@@ -536,6 +535,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(
         data_dir=args.data_dir,
-        plot=args.plot,
         plots_dir=args.plots_dir,
     )

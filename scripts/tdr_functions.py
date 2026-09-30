@@ -274,7 +274,7 @@ def add_effector_masks(
             continue
 
         eff_plan_mask.append(((t >= t_cue + 0.2) & (t < t_mov)).astype(float))
-        eff_mov_mask.append(((t >= t_mov) & (t < t_mov_end)).astype(float))
+        eff_mov_mask.append(((t >= t_mov) & (t < 300)).astype(float))
 
     df["eff_plan_mask"] = eff_plan_mask
     df["eff_mov_mask"] = eff_mov_mask
@@ -1567,3 +1567,148 @@ def condition_mean_subspace_variance(
             )
 
     return pd.DataFrame(rows)
+
+
+def compute_tdr_axis_angles(
+    axes_raw,
+    axes_ortho,
+    axis_names,
+    *,
+    eps=1e-12,
+):
+    """
+    Compare raw TDR beta vectors with Löwdin-orthogonalized axes.
+
+    Parameters
+    ----------
+    axes_raw : ndarray, shape n_units x n_axes
+    axes_ortho : ndarray, shape n_units x n_axes
+    axis_names : sequence of str
+
+    Returns
+    -------
+    pairwise_raw_angles : DataFrame
+        Angles between every pair of raw beta vectors.
+
+    axis_changes : DataFrame
+        Rotation and norm change for each corresponding named axis.
+
+    raw_angle_matrix : DataFrame
+        Signed pairwise raw-axis angles in degrees.
+
+    raw_to_ortho_alignment : DataFrame
+        Cosine similarity between every raw and orthogonalized axis.
+    """
+    axes_raw = np.asarray(axes_raw, dtype=float)
+    axes_ortho = np.asarray(axes_ortho, dtype=float)
+    axis_names = list(axis_names)
+
+    if axes_raw.ndim != 2 or axes_ortho.ndim != 2:
+        raise ValueError("Both axis matrices must be two-dimensional.")
+
+    if axes_raw.shape != axes_ortho.shape:
+        raise ValueError(
+            f"Shape mismatch: raw={axes_raw.shape}, " f"ortho={axes_ortho.shape}."
+        )
+
+    if axes_raw.shape[1] != len(axis_names):
+        raise ValueError(
+            f"There are {axes_raw.shape[1]} axes but " f"{len(axis_names)} axis names."
+        )
+
+    if not (np.all(np.isfinite(axes_raw)) and np.all(np.isfinite(axes_ortho))):
+        raise ValueError("Axis matrices contain non-finite values.")
+
+    raw_norms = np.linalg.norm(axes_raw, axis=0)
+    ortho_norms = np.linalg.norm(axes_ortho, axis=0)
+
+    if np.any(raw_norms <= eps):
+        bad = [name for name, norm in zip(axis_names, raw_norms) if norm <= eps]
+        raise ValueError(f"Near-zero raw beta vectors: {bad}")
+
+    if np.any(ortho_norms <= eps):
+        raise ValueError("At least one orthogonalized axis is near zero.")
+
+    raw_unit = axes_raw / raw_norms
+    ortho_unit = axes_ortho / ortho_norms
+
+    # ------------------------------------------------------------
+    # Pairwise angles among raw beta vectors
+    # ------------------------------------------------------------
+    raw_cosine = np.clip(
+        raw_unit.T @ raw_unit,
+        -1.0,
+        1.0,
+    )
+    raw_angles = np.degrees(np.arccos(raw_cosine))
+    pair_rows = []
+    for i in range(len(axis_names)):
+        for j in range(i + 1, len(axis_names)):
+            signed_angle = raw_angles[i, j]
+            pair_rows.append(
+                {
+                    "axis_1": axis_names[i],
+                    "axis_2": axis_names[j],
+                    "cosine_similarity": raw_cosine[i, j],
+                    "signed_angle_deg": signed_angle,
+                    # Treating +v and -v as the same geometrical axis.
+                    "axis_angle_deg": min(
+                        signed_angle,
+                        180.0 - signed_angle,
+                    ),
+                }
+            )
+
+    pairwise_raw_angles = pd.DataFrame(pair_rows)
+    raw_angle_matrix = pd.DataFrame(
+        raw_angles,
+        index=axis_names,
+        columns=axis_names,
+    )
+
+    # ------------------------------------------------------------
+    # Alignment of every raw vector with every orthogonalized axis
+    # ------------------------------------------------------------
+    raw_to_ortho = np.clip(
+        raw_unit.T @ ortho_unit,
+        -1.0,
+        1.0,
+    )
+    raw_to_ortho_alignment = pd.DataFrame(
+        raw_to_ortho,
+        index=axis_names,
+        columns=axis_names,
+    )
+
+    # ------------------------------------------------------------
+    # Change in each corresponding named axis
+    # ------------------------------------------------------------
+    corresponding_cosine = np.diag(raw_to_ortho)
+    corresponding_angle = np.degrees(
+        np.arccos(
+            np.clip(
+                corresponding_cosine,
+                -1.0,
+                1.0,
+            )
+        )
+    )
+    axis_changes = pd.DataFrame(
+        {
+            "axis": axis_names,
+            "raw_norm": raw_norms,
+            "ortho_norm": ortho_norms,
+            "cosine_raw_vs_ortho": corresponding_cosine,
+            "rotation_deg": corresponding_angle,
+            "axis_rotation_deg": np.minimum(
+                corresponding_angle,
+                180.0 - corresponding_angle,
+            ),
+        }
+    )
+    return (
+        pairwise_raw_angles,
+        axis_changes,
+        raw_angle_matrix,
+        raw_to_ortho_alignment,
+    )

@@ -56,10 +56,6 @@ def main(
     mov_state = 68
     mov_end_state = 69
     go_state = 4
-    df["t_cue"] = df.apply(
-        lambda row: get_state_onset(row["states_onset"], row["states"], cue_state),
-        axis=1,
-    )
     df["t_go"] = df.apply(
         lambda r: get_state_onset(r["states_onset"], r["states"], go_state),
         axis=1,
@@ -80,9 +76,9 @@ def main(
     cue_sdf = df.apply(
         lambda row: slice_sdf_to_event(
             row,
-            event_time_col="t_cue",
+            event_time_col="t_mov",
             t_start=-0.5,
-            t_end=2.0,
+            t_end=0.5,
             bin_size=bin_size,
         ),
         axis=1,
@@ -93,12 +89,11 @@ def main(
     # ------------------------------------------------------------
     # Align other event times to cue
     # ------------------------------------------------------------
-    df["t_mov"] = df["t_mov"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
-    df["t_mov_end"] = df["t_mov_end"].to_numpy(dtype=float) - df["t_cue"].to_numpy(
+    df["t_mov_end"] = df["t_mov_end"].to_numpy(dtype=float) - df["t_mov"].to_numpy(
         dtype=float
     )
-    df["t_go"] = df["t_go"].to_numpy(dtype=float) - df["t_cue"].to_numpy(dtype=float)
-    df["t_cue"] = 0.0
+    df["t_go"] = df["t_go"].to_numpy(dtype=float) - df["t_mov"].to_numpy(dtype=float)
+    df["t_mov"] = 0.0
 
     # ------------------------------------------------------------
     # Remove rows with NaNs in cue or movement SDFs
@@ -119,7 +114,6 @@ def main(
         "fix_pos",
         "recorded_side",
         "target_hemifield",
-        "t_cue",
         "t_mov",
         "t_go",
         "t_mov_end",
@@ -137,26 +131,6 @@ def main(
         if not np.all(np.isfinite([start_time, end_time])):
             return np.zeros_like(time, dtype=float)
         return ((time >= start_time) & (time < end_time)).astype(float)
-
-    # Cue CI
-    df["cueCI"] = df.apply(
-        lambda row: time_window(
-            row["analysis_time"],
-            start_time=row["t_cue"] + 0.05,
-            end_time=row["t_cue"] + 0.20,
-        ),
-        axis=1,
-    )
-
-    # Planning CI
-    df["planCI"] = df.apply(
-        lambda row: time_window(
-            row["analysis_time"],
-            start_time=row["t_cue"] + 0.20,
-            end_time=row["t_mov"],
-        ),
-        axis=1,
-    )
 
     # Movement CI
     saccade_ci_window = (0.0, 0.30)
@@ -228,18 +202,6 @@ def main(
         suffix="_cue",
     )
 
-    """ target_counts = (
-        df.dropna(subset=["space_x", "space_y"])
-        .groupby(["space_x", "space_y"])
-        .size()
-        .reset_index(name="n_rows")
-        .sort_values(["space_x", "space_y"])
-    )
-    target_counts.to_csv(
-        plots_dir / "target_position_counts.csv",
-        index=False,
-    ) """
-
     # ------------------------------------------------------------
     # Effector regressors
     # ------------------------------------------------------------
@@ -257,14 +219,6 @@ def main(
             df[col] = df[effector] * df[space]
             regs.append(col)
 
-    # Planning effector regressors
-    df = mask_regressors(
-        df,
-        regressors=regs,
-        mask_col="eff_plan_mask",
-        suffix="_plan",
-    )
-
     # Movement effector regressors
     df = mask_regressors(
         df,
@@ -276,15 +230,12 @@ def main(
     drop_cols = [
         "unit_ID",
         "trial_index",
-        "t_cue",
         "t_mov",
         "t_go",
         "t_mov_end",
         "analysis_rate",
         "analysis_time",
         # CI regressors
-        "cueCI",
-        "planCI",
         "sacCI",
         "reaCI",
         # Regressors
@@ -313,8 +264,6 @@ def main(
 
     regressors = (
         # CI regressors
-        "cueCI",
-        "planCI",
         "sacCI",
         "reaCI",
         # Regressors
@@ -386,7 +335,7 @@ def main(
     #   3. compute condition averages from held-out test trials only
     #   4. project the test averages onto the training-derived axes
     # ------------------------------------------------------------
-    n_repeats = 60
+    n_repeats = 10
     test_frac = 0.3
     split_condition_cols = [
         "effector",
